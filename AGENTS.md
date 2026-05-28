@@ -78,6 +78,15 @@ lupe prompt "<full user prompt>"
 lupe respond "<full agent response text>"
 ```
 
+At the end of every response where you changed files, run:
+
+```bash
+lupe title "<concise summary of what was accomplished>"
+```
+
+This overwrites the checkpoint title (which defaults to the user's prompt, which
+is often "yeah" or "ok"). Make it descriptive: what was done, not what was asked.
+
 Save after each coherent functional unit, including:
 
 - after a meaningful edit batch

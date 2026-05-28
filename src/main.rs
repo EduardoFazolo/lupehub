@@ -109,6 +109,9 @@ enum Command {
     },
     Status,
     Init,
+    Title {
+        title: String,
+    },
     Fork {
         name: String,
     },
@@ -660,6 +663,10 @@ async fn main() -> Result<()> {
                 (None, None) => println!("author not configured"),
             }
         }
+        Command::Title { title } => {
+            let checkpoint_id = store.set_title(title.clone()).await?;
+            println!("title updated {} -> {}", short_id(checkpoint_id), title);
+        }
         Command::Fork { name } => {
             let fork = store.create_fork(name).await?;
             println!("fork {} -> save {}", fork.name, short_id(fork.save_id));
@@ -999,9 +1006,26 @@ impl Store {
         Ok(result)
     }
 
+    async fn set_title(&self, title: String) -> Result<Uuid> {
+        let checkpoint_id = self.latest_checkpoint_id().await?;
+        sqlx::query("update checkpoints set title = ?1 where id = ?2")
+            .bind(&title)
+            .bind(checkpoint_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(checkpoint_id)
+    }
+
     async fn set_response(&self, response: String) -> Result<Uuid> {
         let checkpoint_id = self.latest_checkpoint_id().await?;
-        self.set_response_for(checkpoint_id, response).await?;
+        self.set_response_for(checkpoint_id, response.clone()).await?;
+        if let Some(title) = title_from_response(&response) {
+            sqlx::query("update checkpoints set title = ?1 where id = ?2")
+                .bind(&title)
+                .bind(checkpoint_id.to_string())
+                .execute(&self.pool)
+                .await?;
+        }
         Ok(checkpoint_id)
     }
 
@@ -2237,6 +2261,42 @@ fn git_push(workspace: &FsPath, message: &str) -> Result<()> {
     run(&["push"])?;
     println!("pushed.");
     Ok(())
+}
+
+fn title_from_response(response: &str) -> Option<String> {
+    for line in response.lines() {
+        let line = line.trim();
+        if line.is_empty()
+            || line.starts_with("```")
+            || line.starts_with('#')
+            || line.starts_with('>')
+            || line.starts_with('-')
+            || line.starts_with('|')
+        {
+            continue;
+        }
+        let clean = line
+            .replace("**", "")
+            .replace('*', "")
+            .replace('_', "")
+            .replace('`', "");
+        let clean = clean.trim().to_string();
+        if clean.len() < 10 {
+            continue;
+        }
+        const MAX: usize = 80;
+        let title = if clean.len() > MAX {
+            let truncated = &clean[..MAX];
+            match truncated.rfind(' ') {
+                Some(pos) => format!("{}...", &truncated[..pos]),
+                None => format!("{}...", truncated),
+            }
+        } else {
+            clean
+        };
+        return Some(title);
+    }
+    None
 }
 
 fn title_from_prompt(prompt: &str) -> String {
