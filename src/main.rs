@@ -108,6 +108,35 @@ enum Command {
         lupe_bin: Option<PathBuf>,
     },
     Status,
+    Workspace {
+        #[command(subcommand)]
+        action: WorkspaceAction,
+    },
+    Author {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        email: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkspaceAction {
+    New {
+        name: String,
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
+    },
+    List,
+    Drop {
+        name: String,
+    },
+}
+
+struct WorkspaceInfo {
+    name: String,
+    path: PathBuf,
+    head: Option<Uuid>,
 }
 
 struct Store {
@@ -176,6 +205,12 @@ struct Snapshot {
     manifest: Manifest,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct AuthorConfig {
+    name: Option<String>,
+    email: Option<String>,
+}
+
 fn detect_agent(override_val: Option<String>) -> String {
     if let Some(v) = override_val {
         return v;
@@ -213,6 +248,7 @@ async fn main() -> Result<()> {
                 }
             }
             let workspace = absolutize(workspace)?;
+            write_default_lupeignore(&workspace)?;
             let title = title.unwrap_or_else(|| title_from_prompt(&prompt));
             let agent = detect_agent(agent);
             let (checkpoint, save) = store
@@ -278,7 +314,7 @@ async fn main() -> Result<()> {
                     "{} ({})  {}  {}",
                     short_id(checkpoint.id),
                     checkpoint.id,
-                    checkpoint.created_at.format("%Y-%m-%d %H:%M:%S"),
+                    friendly_time(checkpoint.created_at),
                     checkpoint.title,
                 );
                 if let Some(agent) = &checkpoint.agent {
@@ -299,7 +335,7 @@ async fn main() -> Result<()> {
                     short_id(save.checkpoint_id),
                     save.sequence,
                     save.file_count,
-                    save.created_at.format("%Y-%m-%d %H:%M:%S"),
+                    friendly_time(save.created_at),
                     save.message.unwrap_or_default()
                 );
             }
@@ -310,7 +346,7 @@ async fn main() -> Result<()> {
                     "{} ({})  {}  {}",
                     short_id(checkpoint.id),
                     checkpoint.id,
-                    checkpoint.created_at.format("%Y-%m-%d %H:%M:%S"),
+                    friendly_time(checkpoint.created_at),
                     checkpoint.title
                 );
                 if let Some(agent) = checkpoint.agent {
@@ -352,18 +388,21 @@ async fn main() -> Result<()> {
                 }
             }
 
-            for (index, checkpoint) in checkpoints.iter().enumerate() {
+            let head_checkpoint_id = main_chain_ids.first().copied();
+
+            for (index, checkpoint) in checkpoints.iter().rev().enumerate() {
                 if index > 0 {
                     println!("{}", colors.dim("│"));
                 }
                 let is_head_checkpoint =
-                    head_save.is_some() && index == 0 && main_chain_set.contains(&checkpoint.id);
+                    head_save.is_some() && Some(checkpoint.id) == head_checkpoint_id;
                 let head_marker = if is_head_checkpoint { " [HEAD]" } else { "" };
                 println!(
-                    "{} {} {} {}{}",
+                    "{} {} {} {} {}{}",
                     colors.checkpoint("◆"),
                     colors.checkpoint(&format!("checkpoint {}", short_id(checkpoint.id))),
                     colors.dim(&format!("({})", checkpoint.id)),
+                    colors.dim(&friendly_time(checkpoint.created_at)),
                     colors.bold(&checkpoint.title),
                     head_marker,
                 );
@@ -378,6 +417,27 @@ async fn main() -> Result<()> {
                 }
 
                 let saves = store.list_saves(Some(checkpoint.id)).await?;
+
+                // Checkpoint overall diff: first save → last save
+                if saves.len() >= 2 {
+                    let first = saves.first().unwrap();
+                    let last = saves.last().unwrap();
+                    let overall = store.diff_saves(first.id, last.id).await?;
+                    let total =
+                        overall.added.len() + overall.modified.len() + overall.removed.len();
+                    if total > 0 {
+                        println!(
+                            "{} {} +{} ~{} -{} overall",
+                            colors.dim("│"),
+                            colors.dim("changes:"),
+                            overall.added.len(),
+                            overall.modified.len(),
+                            overall.removed.len(),
+                        );
+                        print_diff_lines(&overall, &colors, &colors.dim("│"), "  ");
+                    }
+                }
+
                 for (save_index, save) in saves.iter().enumerate() {
                     // Check if any dead branches fork from this save
                     let dead_children = forks_from
@@ -412,6 +472,18 @@ async fn main() -> Result<()> {
                         save.message.as_deref().unwrap_or(""),
                         head_marker,
                     );
+
+                    // Per-save diff: show what changed vs previous save
+                    if save.sequence > 0 {
+                        let prev = &saves[save_index - 1];
+                        let save_diff = store.diff_saves(prev.id, save.id).await?;
+                        let pipe = if is_last_save && !has_dead {
+                            colors.dim(" ")
+                        } else {
+                            colors.dim("│")
+                        };
+                        print_diff_lines(&save_diff, &colors, &pipe, "     ");
+                    }
 
                     // Render dead branches forking from this save
                     for (di, dead) in dead_children.iter().enumerate() {
@@ -497,7 +569,7 @@ async fn main() -> Result<()> {
                     short_id(result.id),
                     result.id,
                     checkpoint,
-                    result.created_at.format("%Y-%m-%d %H:%M:%S"),
+                    friendly_time(result.created_at),
                     result.title
                 );
                 if let Some(detail) = result.detail {
@@ -561,6 +633,73 @@ async fn main() -> Result<()> {
             println!("home {}", store.home.display());
             println!("database {}", store.home.join("lupe.db").display());
             println!("objects {}", store.object_dir.display());
+            let author = store.read_author();
+            match (author.name.as_deref(), author.email.as_deref()) {
+                (Some(n), Some(e)) => println!("author {n} <{e}>"),
+                (Some(n), None) => println!("author {n} <email not set>"),
+                (None, Some(e)) => println!("author <name not set> <{e}>"),
+                (None, None) => println!("author not configured"),
+            }
+        }
+        Command::Workspace { action } => match action {
+            WorkspaceAction::New { name, workspace } => {
+                let workspace = absolutize(workspace)?;
+                let ws_dir = store.create_workspace(&name, &workspace).await?;
+                println!("workspace '{name}' created");
+                println!("path {}", ws_dir.display());
+                println!("cd into it to work or test independently");
+            }
+            WorkspaceAction::List => {
+                let workspaces = store.list_workspaces()?;
+                if workspaces.is_empty() {
+                    println!("no workspaces — run: lupe workspace new <name>");
+                } else {
+                    for ws in workspaces {
+                        let head = ws
+                            .head
+                            .map(|h| short_id(h))
+                            .unwrap_or_else(|| "?".to_string());
+                        println!("{} head={} {}", ws.name, head, ws.path.display());
+                    }
+                }
+            }
+            WorkspaceAction::Drop { name } => {
+                store.drop_workspace(&name)?;
+                println!("workspace '{name}' dropped");
+            }
+        },
+        Command::Author { name, email } => {
+            let mut author = store.read_author();
+            let setting = name.is_some() || email.is_some();
+            if let Some(n) = name {
+                author.name = Some(n);
+            }
+            if let Some(e) = email {
+                author.email = Some(e);
+            }
+            if setting {
+                store.write_author(&author)?;
+            }
+            match (author.name.as_deref(), author.email.as_deref()) {
+                (Some(n), Some(e)) => {
+                    println!("name  {n}");
+                    println!("email {e}");
+                }
+                (Some(n), None) => {
+                    println!("name  {n}");
+                    println!("email (not set)");
+                }
+                (None, Some(e)) => {
+                    println!("name  (not set)");
+                    println!("email {e}");
+                }
+                (None, None) => {
+                    println!("author not configured");
+                    println!(
+                        "set with: lupe author --name \"Your Name\" --email \"your@email.com\""
+                    );
+                }
+            }
         }
     }
 
@@ -657,6 +796,19 @@ impl Store {
         .bind(now.to_rfc3339())
         .execute(&mut *tx)
         .await?;
+
+        for file in &snapshot.manifest.files {
+            sqlx::query(
+                "insert into save_files (save_id, path, hash, size) values (?1, ?2, ?3, ?4)",
+            )
+            .bind(save_id.to_string())
+            .bind(&file.path)
+            .bind(&file.hash)
+            .bind(file.len as i64)
+            .execute(&mut *tx)
+            .await?;
+        }
+
         tx.commit().await?;
 
         self.write_head(save_id)?;
@@ -704,6 +856,7 @@ impl Store {
         .fetch_one(&self.pool)
         .await?;
 
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"
             insert into saves
@@ -720,9 +873,22 @@ impl Store {
         .bind(snapshot.file_count)
         .bind(manifest)
         .bind(now.to_rfc3339())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
+        for file in &snapshot.manifest.files {
+            sqlx::query(
+                "insert into save_files (save_id, path, hash, size) values (?1, ?2, ?3, ?4)",
+            )
+            .bind(save_id.to_string())
+            .bind(&file.path)
+            .bind(&file.hash)
+            .bind(file.len as i64)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
         self.write_head(save_id)?;
 
         Ok(SaveView {
@@ -842,12 +1008,6 @@ impl Store {
         rows.into_iter().map(save_from_row).collect()
     }
 
-    async fn diff_saves(&self, from: Uuid, to: Uuid) -> Result<DiffView> {
-        let from_manifest = self.get_manifest(from).await?;
-        let to_manifest = self.get_manifest(to).await?;
-        Ok(diff_manifests(from, to, &from_manifest, &to_manifest))
-    }
-
     async fn resolve_diff_range(
         &self,
         from: Option<Uuid>,
@@ -856,32 +1016,72 @@ impl Store {
         match (from, to) {
             (Some(from), Some(to)) => Ok((from, to)),
             (None, None) => self.latest_two_saves_in_latest_checkpoint().await,
-            _ => bail!("provide both FROM and TO, or no arguments for the current diff"),
+            (Some(to), None) => {
+                let row: Option<(String, i64)> =
+                    sqlx::query_as("select checkpoint_id, sequence from saves where id = ?1")
+                        .bind(to.to_string())
+                        .fetch_optional(&self.pool)
+                        .await?;
+                let (checkpoint_id, sequence) =
+                    row.ok_or_else(|| anyhow!("save {to} not found"))?;
+                if sequence == 0 {
+                    bail!("save {to} is the first save in its checkpoint — nothing before it");
+                }
+                let from: String = sqlx::query_scalar(
+                    "select id from saves where checkpoint_id = ?1 and sequence = ?2",
+                )
+                .bind(&checkpoint_id)
+                .bind(sequence - 1)
+                .fetch_one(&self.pool)
+                .await?;
+                Ok((parse_uuid(from)?, to))
+            }
+            (None, Some(_)) => bail!("provide a single save uuid, two uuids, or no arguments"),
         }
     }
 
     async fn latest_two_saves_in_latest_checkpoint(&self) -> Result<(Uuid, Uuid)> {
         let checkpoint_id = self.latest_checkpoint_id().await?;
         let rows = sqlx::query(
-            r#"
-            select id
-            from saves
-            where checkpoint_id = ?1
-            order by sequence desc
-            limit 2
-            "#,
+            "select id from saves where checkpoint_id = ?1 order by sequence desc limit 2",
         )
         .bind(checkpoint_id.to_string())
         .fetch_all(&self.pool)
         .await?;
 
-        if rows.len() < 2 {
-            bail!("current checkpoint has fewer than two saves; run `lupe save` first");
+        if rows.len() >= 2 {
+            let to = parse_uuid(rows[0].try_get::<String, _>("id")?)?;
+            let from = parse_uuid(rows[1].try_get::<String, _>("id")?)?;
+            return Ok((from, to));
         }
 
-        let to = parse_uuid(rows[0].try_get::<String, _>("id")?)?;
-        let from = parse_uuid(rows[1].try_get::<String, _>("id")?)?;
-        Ok((from, to))
+        // Single save in current checkpoint — compare HEAD to previous checkpoint's last save
+        let head = rows
+            .into_iter()
+            .next()
+            .map(|r| r.try_get::<String, _>("id"))
+            .transpose()?
+            .ok_or_else(|| anyhow!("no saves found"))?;
+        let to = parse_uuid(head)?;
+
+        let prev: Option<String> = sqlx::query_scalar(
+            r#"
+            select s.id from saves s
+            join checkpoints c on c.id = s.checkpoint_id
+            where c.id != ?1
+              and s.created_at < (select created_at from saves where id = ?2)
+            order by s.created_at desc
+            limit 1
+            "#,
+        )
+        .bind(checkpoint_id.to_string())
+        .bind(to.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let from =
+            prev.ok_or_else(|| anyhow!("only one save exists; nothing to compare against"))?;
+        Ok((parse_uuid(from)?, to))
     }
 
     async fn restore_save(&self, id: Uuid, workspace: &FsPath) -> Result<SaveView> {
@@ -959,6 +1159,107 @@ impl Store {
             .and_then(parse_uuid)
     }
 
+    fn workspaces_root(&self) -> PathBuf {
+        self.home.join("workspaces")
+    }
+
+    async fn create_workspace(&self, name: &str, source_workspace: &FsPath) -> Result<PathBuf> {
+        let ws_dir = self.workspaces_root().join(name);
+        if ws_dir.exists() {
+            bail!("workspace '{name}' already exists at {}", ws_dir.display());
+        }
+
+        let shared = read_lupeshared(source_workspace);
+        let head = self
+            .read_head()
+            .ok_or_else(|| anyhow!("no HEAD — run lupe prompt first"))?;
+        let manifest = self.get_manifest(head).await?;
+
+        fs::create_dir_all(&ws_dir)?;
+
+        // Copy tracked files from object store
+        for file in &manifest.files {
+            let dest = ws_dir.join(&file.path);
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let src = object_path(&self.object_dir, &file.hash)?;
+            fs::copy(src, &dest)?;
+        }
+
+        // Symlink .lupeshared entries from source workspace
+        for shared_path in &shared {
+            let target = source_workspace.join(shared_path);
+            let link = ws_dir.join(shared_path);
+            if target.exists() && !link.exists() {
+                if let Some(parent) = link.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&target, &link)?;
+            }
+        }
+
+        // Symlink config files so workspace inherits ignore rules
+        for config in &[".lupeignore", ".lupeshared"] {
+            let target = source_workspace.join(config);
+            let link = ws_dir.join(config);
+            if target.exists() && !link.exists() {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&target, &link)?;
+            }
+        }
+
+        fs::write(ws_dir.join(".lupe-head"), head.to_string())?;
+        Ok(ws_dir)
+    }
+
+    fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
+        let root = self.workspaces_root();
+        if !root.exists() {
+            return Ok(Vec::new());
+        }
+        let mut workspaces = Vec::new();
+        for entry in fs::read_dir(&root)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let path = entry.path();
+                let head = fs::read_to_string(path.join(".lupe-head"))
+                    .ok()
+                    .and_then(|s| Uuid::parse_str(s.trim()).ok());
+                workspaces.push(WorkspaceInfo { name, path, head });
+            }
+        }
+        workspaces.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(workspaces)
+    }
+
+    fn drop_workspace(&self, name: &str) -> Result<()> {
+        let ws_dir = self.workspaces_root().join(name);
+        if !ws_dir.exists() {
+            bail!("workspace '{name}' not found");
+        }
+        fs::remove_dir_all(&ws_dir)?;
+        Ok(())
+    }
+
+    fn author_path(&self) -> PathBuf {
+        self.home.join("author.json")
+    }
+
+    fn read_author(&self) -> AuthorConfig {
+        fs::read_to_string(self.author_path())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    fn write_author(&self, author: &AuthorConfig) -> Result<()> {
+        fs::write(self.author_path(), serde_json::to_string_pretty(author)?)?;
+        Ok(())
+    }
+
     async fn get_save(&self, id: Uuid) -> Result<SaveView> {
         let row = sqlx::query(
             r#"
@@ -974,11 +1275,73 @@ impl Store {
     }
 
     async fn get_manifest(&self, id: Uuid) -> Result<Manifest> {
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+            "select path, hash, size from save_files where save_id = ?1 order by path",
+        )
+        .bind(id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+
+        if !rows.is_empty() {
+            return Ok(Manifest {
+                files: rows
+                    .into_iter()
+                    .map(|(path, hash, len)| FileEntry {
+                        path,
+                        hash,
+                        len: len as u64,
+                    })
+                    .collect(),
+            });
+        }
+
+        // Legacy: fall back to manifest JSON blob for saves before migration
         let value: String = sqlx::query_scalar("select manifest from saves where id = ?1")
             .bind(id.to_string())
             .fetch_one(&self.pool)
             .await?;
         Ok(serde_json::from_str(&value)?)
+    }
+
+    async fn diff_saves(&self, from: Uuid, to: Uuid) -> Result<DiffView> {
+        let added: Vec<String> = sqlx::query_scalar(
+            "select path from save_files where save_id = ?1
+             and path not in (select path from save_files where save_id = ?2)
+             order by path",
+        )
+        .bind(to.to_string())
+        .bind(from.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let removed: Vec<String> = sqlx::query_scalar(
+            "select path from save_files where save_id = ?1
+             and path not in (select path from save_files where save_id = ?2)
+             order by path",
+        )
+        .bind(from.to_string())
+        .bind(to.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let modified: Vec<String> = sqlx::query_scalar(
+            "select sf1.path from save_files sf1
+             join save_files sf2 on sf1.path = sf2.path and sf2.save_id = ?2
+             where sf1.save_id = ?1 and sf1.hash != sf2.hash
+             order by sf1.path",
+        )
+        .bind(from.to_string())
+        .bind(to.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(DiffView {
+            from,
+            to,
+            added,
+            modified,
+            removed,
+        })
     }
 }
 
@@ -1008,6 +1371,16 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         "create index if not exists checkpoints_created_at_idx on checkpoints (created_at desc)",
         "create index if not exists saves_created_at_idx on saves (created_at desc)",
         "create index if not exists saves_checkpoint_sequence_idx on saves (checkpoint_id, sequence)",
+        r#"
+        create table if not exists save_files (
+            save_id text not null references saves(id) on delete cascade,
+            path text not null,
+            hash text not null,
+            size integer not null default 0,
+            primary key (save_id, path)
+        )
+        "#,
+        "create index if not exists save_files_path_idx on save_files (path, save_id)",
     ];
 
     for statement in statements {
@@ -1048,6 +1421,33 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
             .await?;
     }
 
+    // Populate save_files from existing manifest blobs for saves not yet migrated
+    let unmigrated: Vec<(String, String)> = sqlx::query_as(
+        "select id, manifest from saves
+         where id not in (select distinct save_id from save_files)
+         and manifest != ''",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for (save_id, manifest_json) in unmigrated {
+        let manifest: Manifest = match serde_json::from_str(&manifest_json) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        for file in manifest.files {
+            sqlx::query(
+                "insert or ignore into save_files (save_id, path, hash, size) values (?1, ?2, ?3, ?4)",
+            )
+            .bind(&save_id)
+            .bind(&file.path)
+            .bind(&file.hash)
+            .bind(file.len as i64)
+            .execute(pool)
+            .await?;
+        }
+    }
+
     Ok(())
 }
 
@@ -1071,11 +1471,12 @@ fn snapshot_workspace(workspace: &FsPath, object_dir: &FsPath) -> Result<Snapsho
         bail!("workspace is not a directory: {}", workspace.display());
     }
 
+    let ignore = read_lupeignore(workspace);
     let mut files = Vec::new();
     for entry in WalkDir::new(workspace).follow_links(false) {
         let entry = entry?;
         let path = entry.path();
-        if should_skip(workspace, path) || !entry.file_type().is_file() {
+        if should_skip(workspace, path, &ignore) || !entry.file_type().is_file() {
             continue;
         }
 
@@ -1106,44 +1507,11 @@ fn snapshot_workspace(workspace: &FsPath, object_dir: &FsPath) -> Result<Snapsho
     })
 }
 
-fn diff_manifests(from: Uuid, to: Uuid, a: &Manifest, b: &Manifest) -> DiffView {
-    let a_files: BTreeMap<&str, &str> = a
-        .files
-        .iter()
-        .map(|file| (file.path.as_str(), file.hash.as_str()))
-        .collect();
-    let b_files: BTreeMap<&str, &str> = b
-        .files
-        .iter()
-        .map(|file| (file.path.as_str(), file.hash.as_str()))
-        .collect();
-    let paths: BTreeSet<&str> = a_files.keys().chain(b_files.keys()).copied().collect();
-
-    let mut added = Vec::new();
-    let mut modified = Vec::new();
-    let mut removed = Vec::new();
-    for path in paths {
-        match (a_files.get(path), b_files.get(path)) {
-            (None, Some(_)) => added.push(path.to_string()),
-            (Some(_), None) => removed.push(path.to_string()),
-            (Some(a_hash), Some(b_hash)) if a_hash != b_hash => modified.push(path.to_string()),
-            _ => {}
-        }
-    }
-
-    DiffView {
-        from,
-        to,
-        added,
-        modified,
-        removed,
-    }
-}
-
 fn restore_manifest(manifest: &Manifest, object_dir: &FsPath, workspace: &FsPath) -> Result<()> {
     if !workspace.is_dir() {
         bail!("workspace is not a directory: {}", workspace.display());
     }
+    let ignore = read_lupeignore(workspace);
     let wanted: BTreeSet<&str> = manifest
         .files
         .iter()
@@ -1156,7 +1524,7 @@ fn restore_manifest(manifest: &Manifest, object_dir: &FsPath, workspace: &FsPath
     {
         let entry = entry?;
         let path = entry.path();
-        if should_skip(workspace, path) {
+        if should_skip(workspace, path, &ignore) {
             continue;
         }
         if entry.file_type().is_file() {
@@ -1181,13 +1549,56 @@ fn restore_manifest(manifest: &Manifest, object_dir: &FsPath, workspace: &FsPath
     Ok(())
 }
 
-fn should_skip(workspace: &FsPath, path: &FsPath) -> bool {
+const DEFAULT_IGNORE: &[&str] = &[".git", ".lupe", "target", "node_modules"];
+
+fn read_lupeignore(workspace: &FsPath) -> Vec<String> {
+    let path = workspace.join(".lupeignore");
+    match fs::read_to_string(&path) {
+        Ok(content) => content
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| l.to_string())
+            .collect(),
+        Err(_) => DEFAULT_IGNORE.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+fn read_lupeshared(workspace: &FsPath) -> Vec<String> {
+    let path = workspace.join(".lupeshared");
+    match fs::read_to_string(&path) {
+        Ok(content) => content
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| l.to_string())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn write_default_lupeignore(workspace: &FsPath) -> Result<()> {
+    let path = workspace.join(".lupeignore");
+    if !path.exists() {
+        fs::write(
+            &path,
+            "# Lupe ignore — files and directories lupe will not snapshot\n\
+             .git\n\
+             .lupe\n\
+             target\n\
+             node_modules\n",
+        )?;
+    }
+    Ok(())
+}
+
+fn should_skip(workspace: &FsPath, path: &FsPath, ignore: &[String]) -> bool {
     let Ok(rel) = path.strip_prefix(workspace) else {
         return true;
     };
     rel.components().any(|component| {
         let s = component.as_os_str().to_string_lossy();
-        matches!(s.as_ref(), ".git" | ".lupe" | "target" | "node_modules")
+        ignore.iter().any(|pattern| s.as_ref() == pattern.as_str())
     })
 }
 
@@ -1314,6 +1725,18 @@ impl Colors {
 
     fn dead(&self, value: &str) -> String {
         self.paint("2;33", value)
+    }
+
+    fn added(&self, value: &str) -> String {
+        self.paint("32", value)
+    }
+
+    fn modified(&self, value: &str) -> String {
+        self.paint("33", value)
+    }
+
+    fn removed(&self, value: &str) -> String {
+        self.paint("31", value)
     }
 
     fn paint(&self, code: &str, value: &str) -> String {
@@ -1519,6 +1942,24 @@ fn lupe_agent_section() -> &'static str {
 
 Lupe is prompt-driven source control for agents.
 
+## Project Setup — Do This First
+
+At the start of any session in a new project, check for `.lupeignore` and
+`.lupeshared`. If either is missing, detect the stack and create them.
+
+Detect stack: `package.json` → Node, `Cargo.toml` → Rust, `requirements.txt`/
+`pyproject.toml` → Python, `go.mod` → Go, `pom.xml`/`build.gradle` → Java.
+
+`.lupeignore` — what lupe does NOT snapshot. Auto-created on first `lupe prompt`
+with generic defaults, but create it early with stack-specific entries
+(e.g. `dist`, `.next`, `__pycache__`, `build`).
+
+`.lupeshared` — what gets symlinked instead of copied into `lupe workspace` forks.
+List expensive-to-reinstall dirs: `node_modules`, `target`, `.venv`.
+Only include entries that actually exist in the project.
+
+## Workflow
+
 At the start of every user request that may modify files, run:
 
 ```bash
@@ -1534,6 +1975,9 @@ lupe save "<short description of what changed or now works>"
 Save after each coherent functional unit, before risky changes, after tests pass,
 and before restore/destructive operations.
 
+**Never revert work by editing files manually. Always use `lupe restore`.**
+This preserves dropped work as a dead branch visible in `lupe graph`.
+
 Useful commands:
 
 ```bash
@@ -1541,11 +1985,19 @@ lupe install
 lupe history
 lupe prompts
 lupe saves
+lupe graph
 lupe search "<topic>"
-lupe diff <from-save-uuid> <to-save-uuid>
+lupe diff
+lupe diff <save-uuid>
+lupe diff <from-uuid> <to-uuid>
 lupe restore <save-uuid>
 lupe install-agent
 lupe install-hooks
+lupe workspace new <name>
+lupe workspace list
+lupe workspace drop <name>
+lupe author
+lupe author --name "Name" --email "email"
 ```
 
 `lupe install` configures the current workspace and wires agent stop hooks.
@@ -1553,6 +2005,56 @@ Lupe does not automatically see prompts unless the agent or host calls Lupe.
 This file is the contract that tells agents when to call it.
 <!-- /lupe-agent-workflow -->
 "#
+}
+
+fn print_diff_lines(diff: &DiffView, colors: &Colors, pipe: &str, indent: &str) {
+    const MAX: usize = 8;
+    let mut lines: Vec<String> = Vec::new();
+    for f in &diff.added {
+        lines.push(colors.added(&format!("+ {f}")));
+    }
+    for f in &diff.modified {
+        lines.push(colors.modified(&format!("~ {f}")));
+    }
+    for f in &diff.removed {
+        lines.push(colors.removed(&format!("- {f}")));
+    }
+    let total = lines.len();
+    let shown = lines.into_iter().take(MAX);
+    for line in shown {
+        println!("{}{}{}", pipe, indent, line);
+    }
+    if total > MAX {
+        println!(
+            "{}{}{}",
+            pipe,
+            indent,
+            colors.dim(&format!("... +{} more", total - MAX))
+        );
+    }
+}
+
+fn ordinal(day: u32) -> &'static str {
+    match (day % 100, day % 10) {
+        (11..=13, _) => "th",
+        (_, 1) => "st",
+        (_, 2) => "nd",
+        (_, 3) => "rd",
+        _ => "th",
+    }
+}
+
+fn friendly_time(dt: DateTime<Utc>) -> String {
+    let day = dt.format("%-d").to_string().parse::<u32>().unwrap_or(0);
+    format!(
+        "{}, {} - {} {}{} {}",
+        dt.format("%I:%M %p"),
+        dt.format("%a"),
+        dt.format("%B"),
+        day,
+        ordinal(day),
+        dt.format("%Y"),
+    )
 }
 
 fn one_line(value: &str) -> String {

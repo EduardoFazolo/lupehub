@@ -1,4 +1,5 @@
 # Lupe Agent Workflow
+<!-- test comment to trigger a diff — second edit -->
 
 Lupe is agent-native source control. It is not Git, and it does not use GitHub,
 Docker, Postgres, or a server in the current implementation.
@@ -18,6 +19,63 @@ Use Lupe whenever you are acting as an agent in a workspace and may change files
 - `diff <from> <to>` compares explicit saved states.
 - `restore` restores a saved state into the workspace.
 - `search` searches remembered checkpoint/save text.
+
+## Project Setup — Do This First
+
+At the start of any session in a new project, check for `.lupeignore` and
+`.lupeshared`. If either is missing, detect the stack and create them.
+
+**Detect stack by looking for:**
+- `package.json` → Node/JS/TS
+- `Cargo.toml` → Rust
+- `requirements.txt` / `pyproject.toml` / `uv.lock` → Python
+- `go.mod` → Go
+- `pom.xml` / `build.gradle` → Java/Kotlin
+- Multiple of the above → monorepo, include all
+
+**`.lupeignore`** — what lupe will NOT snapshot (created automatically on first
+`lupe prompt`, but you can create it earlier with better stack-specific content):
+
+```
+# Node
+node_modules
+dist
+.next
+.nuxt
+out
+
+# Rust
+target
+
+# Python
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+
+# General
+.git
+.lupe
+build
+dist
+```
+
+**`.lupeshared`** — what gets symlinked (not copied) into `lupe workspace` forks.
+Should list anything expensive to reinstall (dependencies, build artifacts):
+
+```
+# Node
+node_modules
+
+# Rust
+target
+
+# Python
+.venv
+```
+
+Only include entries that actually exist in the project. Ask the user to confirm
+before writing if you are unsure about the stack.
 
 ## Required Agent Behavior
 
@@ -66,6 +124,16 @@ lupe diff <from-save-uuid> <to-save-uuid>
 lupe restore <save-uuid>
 ```
 
+**Never revert or undo work by manually editing or deleting files.** When dropping
+a feature, rolling back a change, or abandoning an approach, always use
+`lupe restore` to move HEAD to the pre-feature save. This preserves the dropped
+work as a dead branch visible in `lupe graph`.
+
+Workflow for dropping a feature:
+1. `lupe save "feature complete before drop"` — preserve the current state
+2. `lupe saves` — find the save taken before the feature was started
+3. `lupe restore <pre-feature-save-uuid>` — move HEAD back
+
 Before using `lupe restore`, inspect the target save and create a new save of the
 current state if there is any useful work to preserve.
 
@@ -88,6 +156,11 @@ lupe restore <save-uuid>
 lupe respond "full agent response"
 lupe install-agent
 lupe install-hooks
+lupe author
+lupe author --name "Your Name" --email "your@email.com"
+lupe workspace new <name>
+lupe workspace list
+lupe workspace drop <name>
 ```
 
 Storage starts automatically. If Lupe finds `.lupe` in the current directory or
@@ -96,6 +169,11 @@ workspace. `lupe status` shows the active database/object-store paths and mode.
 Use `LUPE_HOME` or `--home` to override the storage location.
 
 `lupe install` configures the current workspace and wires agent stop hooks.
+`lupe author` reads the current author name and email for this project store.
+`lupe author --name X --email Y` sets them (both optional; partial updates OK).
+If author is not configured when starting a session, ask the user for name and
+email and set them with `lupe author --name "..." --email "..."`.
+
 `lupe install-agent` writes or appends Lupe instructions to `AGENTS.md` in the
 current workspace. `lupe install-hooks` only wires stop hooks.
 
