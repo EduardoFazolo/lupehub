@@ -51,14 +51,22 @@ enum Command {
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
     },
-    History,
+    History {
+        #[arg(long)]
+        all: bool,
+    },
     Saves {
         checkpoint: Option<Uuid>,
     },
-    Prompts,
+    Prompts {
+        #[arg(long)]
+        all: bool,
+    },
     Graph {
         #[arg(long)]
         no_color: bool,
+        #[arg(long)]
+        all: bool,
     },
     Diff {
         from: Option<Uuid>,
@@ -103,6 +111,7 @@ struct CheckpointView {
     prompt: Option<String>,
     response: Option<String>,
     agent: Option<String>,
+    parent_save_id: Option<Uuid>,
     created_at: DateTime<Utc>,
 }
 
@@ -246,8 +255,8 @@ async fn main() -> Result<()> {
                 &save.root_hash[..12]
             );
         }
-        Command::History => {
-            for checkpoint in store.list_checkpoints().await? {
+        Command::History { all } => {
+            for checkpoint in store.list_checkpoints(all).await? {
                 println!(
                     "{} ({})  {}  {}",
                     short_id(checkpoint.id),
@@ -275,8 +284,8 @@ async fn main() -> Result<()> {
                 );
             }
         }
-        Command::Prompts => {
-            for checkpoint in store.list_checkpoints().await? {
+        Command::Prompts { all } => {
+            for checkpoint in store.list_checkpoints(all).await? {
                 println!(
                     "{} ({})  {}  {}",
                     short_id(checkpoint.id),
@@ -294,24 +303,50 @@ async fn main() -> Result<()> {
                 println!();
             }
         }
-        Command::Graph { no_color } => {
+        Command::Graph { no_color, all } => {
             let colors = Colors::new(!no_color);
-            let checkpoints = store.list_checkpoints().await?;
+            let head_save = store.read_head();
+            let main_chain_ids = store.main_chain_checkpoint_ids().await?;
+            let main_chain_set: std::collections::HashSet<Uuid> =
+                main_chain_ids.iter().copied().collect();
+
+            // All checkpoints needed to render the graph
+            let checkpoints = store.list_checkpoints(all).await?;
             if checkpoints.is_empty() {
                 println!("no checkpoints yet");
                 return Ok(());
+            }
+
+            // Build map: save_id → dead-branch checkpoints forking from it
+            let all_checkpoints_for_forks = store.list_checkpoints(true).await?;
+            let mut forks_from: std::collections::HashMap<Uuid, Vec<&CheckpointView>> =
+                std::collections::HashMap::new();
+            // We need to own the vec for lifetime reasons — collect all non-main checkpoints
+            let dead_checkpoints: Vec<CheckpointView> = all_checkpoints_for_forks
+                .into_iter()
+                .filter(|c| !main_chain_set.contains(&c.id))
+                .collect();
+            for c in &dead_checkpoints {
+                if let Some(psid) = c.parent_save_id {
+                    forks_from.entry(psid).or_default().push(c);
+                }
             }
 
             for (index, checkpoint) in checkpoints.iter().enumerate() {
                 if index > 0 {
                     println!("{}", colors.dim("│"));
                 }
+                let is_head_checkpoint = head_save.is_some()
+                    && index == 0
+                    && main_chain_set.contains(&checkpoint.id);
+                let head_marker = if is_head_checkpoint { " [HEAD]" } else { "" };
                 println!(
-                    "{} {} {} {}",
+                    "{} {} {} {}{}",
                     colors.checkpoint("◆"),
                     colors.checkpoint(&format!("checkpoint {}", short_id(checkpoint.id))),
                     colors.dim(&format!("({})", checkpoint.id)),
-                    colors.bold(&checkpoint.title)
+                    colors.bold(&checkpoint.title),
+                    head_marker,
                 );
                 println!(
                     "{} {} {}",
@@ -330,26 +365,62 @@ async fn main() -> Result<()> {
 
                 let saves = store.list_saves(Some(checkpoint.id)).await?;
                 for (save_index, save) in saves.iter().enumerate() {
-                    let branch = if save_index + 1 == saves.len() {
-                        "└─"
-                    } else {
-                        "├─"
-                    };
-                    let label = if save.sequence == 0 {
-                        "initial"
-                    } else {
-                        "save"
-                    };
+                    // Check if any dead branches fork from this save
+                    let dead_children = forks_from.get(&save.id).map(|v| v.as_slice()).unwrap_or(&[]);
+                    let has_dead = !dead_children.is_empty();
+                    let is_last_save = save_index + 1 == saves.len();
+                    let branch = if is_last_save && !has_dead { "└─" } else { "├─" };
+                    let label = if save.sequence == 0 { "initial" } else { "save" };
+                    let head_marker = if head_save == Some(save.id) { " ◄ HEAD" } else { "" };
                     println!(
-                        "{} {} {} {} {} {} {}",
+                        "{} {} {} {} {} {} {}{}",
                         colors.dim(branch),
                         colors.save("●"),
                         colors.save(&format!("{label} {}", short_id(save.id))),
                         colors.dim(&format!("seq={}", save.sequence)),
                         colors.dim(&format!("files={}", save.file_count)),
                         colors.dim(&format!("root={}", &save.root_hash[..12])),
-                        save.message.as_deref().unwrap_or("")
+                        save.message.as_deref().unwrap_or(""),
+                        head_marker,
                     );
+
+                    // Render dead branches forking from this save
+                    for (di, dead) in dead_children.iter().enumerate() {
+                        let is_last_dead = di + 1 == dead_children.len();
+                        let pipe = if is_last_save && is_last_dead { " " } else { "│" };
+                        println!("{}", colors.dim(&format!("{pipe}  │")));
+                        println!(
+                            "{}",
+                            colors.dead(&format!(
+                                "{pipe}  ╰─ ◆ dead branch: {} ({}) {}",
+                                short_id(dead.id),
+                                dead.id,
+                                dead.title
+                            ))
+                        );
+                        println!(
+                            "{}",
+                            colors.dead(&format!(
+                                "{pipe}        prompt: {}",
+                                one_line(dead.prompt.as_deref().unwrap_or(""))
+                            ))
+                        );
+                        let dead_saves = store.list_saves(Some(dead.id)).await?;
+                        for (dsi, dsave) in dead_saves.iter().enumerate() {
+                            let dlabel = if dsave.sequence == 0 { "initial" } else { "save" };
+                            let dbranch = if dsi + 1 == dead_saves.len() { "└─" } else { "├─" };
+                            println!(
+                                "{}",
+                                colors.dead(&format!(
+                                    "{pipe}        {dbranch} ● {dlabel} {} seq={} files={} {}",
+                                    short_id(dsave.id),
+                                    dsave.sequence,
+                                    dsave.file_count,
+                                    dsave.message.as_deref().unwrap_or("")
+                                ))
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -403,7 +474,7 @@ async fn main() -> Result<()> {
                 Some(m) => m,
                 None => {
                     let checkpoint = store
-                        .list_checkpoints()
+                        .list_checkpoints(false)
                         .await?
                         .into_iter()
                         .next()
@@ -434,6 +505,21 @@ async fn main() -> Result<()> {
 }
 
 impl Store {
+    fn head_path(&self) -> PathBuf {
+        self.home.join("HEAD")
+    }
+
+    pub fn read_head(&self) -> Option<Uuid> {
+        fs::read_to_string(self.head_path())
+            .ok()
+            .and_then(|s| Uuid::parse_str(s.trim()).ok())
+    }
+
+    fn write_head(&self, save_id: Uuid) -> Result<()> {
+        fs::write(self.head_path(), save_id.to_string())?;
+        Ok(())
+    }
+
     async fn open(home: Option<PathBuf>) -> Result<Self> {
         let (home, home_source) = match home {
             Some(home) => (home, "explicit".to_string()),
@@ -452,12 +538,14 @@ impl Store {
             .with_context(|| format!("failed to open {}", db_path.display()))?;
 
         migrate(&pool).await?;
-        Ok(Self {
+        let store = Self {
             pool,
             home,
             home_source,
             object_dir,
-        })
+        };
+        bootstrap_head_if_missing(&store).await?;
+        Ok(store)
     }
 
     async fn create_checkpoint(
@@ -467,6 +555,7 @@ impl Store {
         agent: String,
         workspace: &FsPath,
     ) -> Result<(CheckpointView, SaveView)> {
+        let parent_save_id = self.read_head();
         let checkpoint_id = Uuid::now_v7();
         let save_id = Uuid::now_v7();
         let now = Utc::now();
@@ -476,14 +565,15 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"
-            insert into checkpoints (id, title, prompt, agent, created_at)
-            values (?1, ?2, ?3, ?4, ?5)
+            insert into checkpoints (id, title, prompt, agent, parent_save_id, created_at)
+            values (?1, ?2, ?3, ?4, ?5, ?6)
             "#,
         )
         .bind(checkpoint_id.to_string())
         .bind(&title)
         .bind(&prompt)
         .bind(&agent)
+        .bind(parent_save_id.map(|id| id.to_string()))
         .bind(now.to_rfc3339())
         .execute(&mut *tx)
         .await?;
@@ -506,6 +596,8 @@ impl Store {
         .await?;
         tx.commit().await?;
 
+        self.write_head(save_id)?;
+
         Ok((
             CheckpointView {
                 id: checkpoint_id,
@@ -513,6 +605,7 @@ impl Store {
                 prompt: Some(prompt),
                 response: None,
                 agent: Some(agent),
+                parent_save_id,
                 created_at: now,
             },
             SaveView {
@@ -567,6 +660,8 @@ impl Store {
         .execute(&self.pool)
         .await?;
 
+        self.write_head(save_id)?;
+
         Ok(SaveView {
             id: save_id,
             checkpoint_id,
@@ -578,13 +673,66 @@ impl Store {
         })
     }
 
-    async fn list_checkpoints(&self) -> Result<Vec<CheckpointView>> {
-        let rows = sqlx::query(
-            "select id, title, prompt, response, agent, created_at from checkpoints order by created_at desc",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter().map(checkpoint_from_row).collect()
+    async fn main_chain_checkpoint_ids(&self) -> Result<Vec<Uuid>> {
+        let mut result = Vec::new();
+        let mut current_save = self.read_head();
+        loop {
+            let Some(save_id) = current_save else { break };
+            let checkpoint_id: Option<String> = sqlx::query_scalar(
+                "select checkpoint_id from saves where id = ?1",
+            )
+            .bind(save_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+            let Some(checkpoint_id) = checkpoint_id else { break };
+            let checkpoint_id = parse_uuid(checkpoint_id)?;
+            if result.contains(&checkpoint_id) {
+                break;
+            }
+            result.push(checkpoint_id);
+            let parent: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+                "select parent_save_id from checkpoints where id = ?1",
+            )
+            .bind(checkpoint_id.to_string())
+            .fetch_one(&self.pool)
+            .await?;
+            current_save = parent.and_then(|s| Uuid::parse_str(&s).ok());
+        }
+        Ok(result)
+    }
+
+    async fn list_checkpoints(&self, all: bool) -> Result<Vec<CheckpointView>> {
+        if all {
+            let rows = sqlx::query(
+                "select id, title, prompt, response, agent, parent_save_id, created_at from checkpoints order by created_at desc",
+            )
+            .fetch_all(&self.pool)
+            .await?;
+            return rows.into_iter().map(checkpoint_from_row).collect();
+        }
+
+        let ids = self.main_chain_checkpoint_ids().await?;
+        if ids.is_empty() {
+            // No HEAD yet — fall back to all by created_at
+            let rows = sqlx::query(
+                "select id, title, prompt, response, agent, parent_save_id, created_at from checkpoints order by created_at desc",
+            )
+            .fetch_all(&self.pool)
+            .await?;
+            return rows.into_iter().map(checkpoint_from_row).collect();
+        }
+
+        let mut result = Vec::with_capacity(ids.len());
+        for id in &ids {
+            let row = sqlx::query(
+                "select id, title, prompt, response, agent, parent_save_id, created_at from checkpoints where id = ?1",
+            )
+            .bind(id.to_string())
+            .fetch_one(&self.pool)
+            .await?;
+            result.push(checkpoint_from_row(row)?);
+        }
+        Ok(result)
     }
 
     async fn set_response(&self, response: String) -> Result<Uuid> {
@@ -676,6 +824,7 @@ impl Store {
         let save = self.get_save(id).await?;
         let manifest = self.get_manifest(id).await?;
         restore_manifest(&manifest, &self.object_dir, workspace)?;
+        self.write_head(id)?;
         Ok(save)
     }
 
@@ -728,13 +877,23 @@ impl Store {
     }
 
     async fn latest_checkpoint_id(&self) -> Result<Uuid> {
+        if let Some(head) = self.read_head() {
+            let id: Option<String> = sqlx::query_scalar(
+                "select checkpoint_id from saves where id = ?1",
+            )
+            .bind(head.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+            if let Some(id) = id {
+                return parse_uuid(id);
+            }
+        }
         let id: Option<String> =
             sqlx::query_scalar("select id from checkpoints order by created_at desc limit 1")
                 .fetch_optional(&self.pool)
                 .await?;
-        let id =
-            id.ok_or_else(|| anyhow!("no checkpoint exists; run `lupe checkpoint <title>` first"))?;
-        parse_uuid(id)
+        id.ok_or_else(|| anyhow!("no checkpoint exists; run `lupe checkpoint <title>` first"))
+            .and_then(parse_uuid)
     }
 
     async fn get_save(&self, id: Uuid) -> Result<SaveView> {
@@ -815,6 +974,33 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
             .await?;
     }
 
+    let has_parent_save_id: bool = sqlx::query_scalar(
+        "select count(*) > 0 from pragma_table_info('checkpoints') where name = 'parent_save_id'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !has_parent_save_id {
+        sqlx::query("alter table checkpoints add column parent_save_id text references saves(id)")
+            .execute(pool)
+            .await?;
+    }
+
+    Ok(())
+}
+
+async fn bootstrap_head_if_missing(store: &Store) -> Result<()> {
+    if store.head_path().exists() {
+        return Ok(());
+    }
+    let latest: Option<String> = sqlx::query_scalar(
+        "select id from saves order by created_at desc limit 1",
+    )
+    .fetch_optional(&store.pool)
+    .await?;
+    if let Some(id) = latest {
+        let uuid = parse_uuid(id)?;
+        store.write_head(uuid)?;
+    }
     Ok(())
 }
 
@@ -975,6 +1161,7 @@ fn checkpoint_from_row(row: sqlx::sqlite::SqliteRow) -> Result<CheckpointView> {
         prompt: row.try_get("prompt")?,
         response: row.try_get("response")?,
         agent: row.try_get("agent")?,
+        parent_save_id: optional_uuid(row.try_get("parent_save_id")?)?,
         created_at: parse_time(row.try_get::<String, _>("created_at")?)?,
     })
 }
@@ -1061,6 +1248,10 @@ impl Colors {
 
     fn bold(&self, value: &str) -> String {
         self.paint("1", value)
+    }
+
+    fn dead(&self, value: &str) -> String {
+        self.paint("2;33", value)
     }
 
     fn paint(&self, code: &str, value: &str) -> String {
