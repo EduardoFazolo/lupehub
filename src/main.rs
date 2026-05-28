@@ -1807,6 +1807,24 @@ fn lupe_agent_section() -> &'static str {
 
 Lupe is prompt-driven source control for agents.
 
+## Project Setup — Do This First
+
+At the start of any session in a new project, check for `.lupeignore` and
+`.lupeshared`. If either is missing, detect the stack and create them.
+
+Detect stack: `package.json` → Node, `Cargo.toml` → Rust, `requirements.txt`/
+`pyproject.toml` → Python, `go.mod` → Go, `pom.xml`/`build.gradle` → Java.
+
+`.lupeignore` — what lupe does NOT snapshot. Auto-created on first `lupe prompt`
+with generic defaults, but create it early with stack-specific entries
+(e.g. `dist`, `.next`, `__pycache__`, `build`).
+
+`.lupeshared` — what gets symlinked instead of copied into `lupe workspace` forks.
+List expensive-to-reinstall dirs: `node_modules`, `target`, `.venv`.
+Only include entries that actually exist in the project.
+
+## Workflow
+
 At the start of every user request that may modify files, run:
 
 ```bash
@@ -1822,15 +1840,26 @@ lupe save "<short description of what changed or now works>"
 Save after each coherent functional unit, before risky changes, after tests pass,
 and before restore/destructive operations.
 
+**Never revert work by editing files manually. Always use `lupe restore`.**
+This preserves dropped work as a dead branch visible in `lupe graph`.
+
 Useful commands:
 
 ```bash
 lupe history
 lupe prompts
 lupe saves
+lupe graph
 lupe search "<topic>"
-lupe diff <from-save-uuid> <to-save-uuid>
+lupe diff
+lupe diff <save-uuid>
+lupe diff <from-uuid> <to-uuid>
 lupe restore <save-uuid>
+lupe workspace new <name>
+lupe workspace list
+lupe workspace drop <name>
+lupe author
+lupe author --name "Name" --email "email"
 ```
 
 Lupe does not automatically see prompts unless the agent or host calls Lupe.

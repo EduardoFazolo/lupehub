@@ -20,6 +20,63 @@ Use Lupe whenever you are acting as an agent in a workspace and may change files
 - `restore` restores a saved state into the workspace.
 - `search` searches remembered checkpoint/save text.
 
+## Project Setup — Do This First
+
+At the start of any session in a new project, check for `.lupeignore` and
+`.lupeshared`. If either is missing, detect the stack and create them.
+
+**Detect stack by looking for:**
+- `package.json` → Node/JS/TS
+- `Cargo.toml` → Rust
+- `requirements.txt` / `pyproject.toml` / `uv.lock` → Python
+- `go.mod` → Go
+- `pom.xml` / `build.gradle` → Java/Kotlin
+- Multiple of the above → monorepo, include all
+
+**`.lupeignore`** — what lupe will NOT snapshot (created automatically on first
+`lupe prompt`, but you can create it earlier with better stack-specific content):
+
+```
+# Node
+node_modules
+dist
+.next
+.nuxt
+out
+
+# Rust
+target
+
+# Python
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+
+# General
+.git
+.lupe
+build
+dist
+```
+
+**`.lupeshared`** — what gets symlinked (not copied) into `lupe workspace` forks.
+Should list anything expensive to reinstall (dependencies, build artifacts):
+
+```
+# Node
+node_modules
+
+# Rust
+target
+
+# Python
+.venv
+```
+
+Only include entries that actually exist in the project. Ask the user to confirm
+before writing if you are unsure about the stack.
+
 ## Required Agent Behavior
 
 The stop hook auto-captures every user message and agent response.
@@ -99,6 +156,9 @@ lupe respond "full agent response"
 lupe install-agent
 lupe author
 lupe author --name "Your Name" --email "your@email.com"
+lupe workspace new <name>
+lupe workspace list
+lupe workspace drop <name>
 ```
 
 Storage starts automatically. If Lupe finds `.lupe` in the current directory or

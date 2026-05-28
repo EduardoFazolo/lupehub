@@ -12,6 +12,22 @@ Lupe is source control for agents:
 - Saves are intentionally frequent and local.
 - Git/GitHub are not Lupe's backend.
 
+## Project Setup — Do This First
+
+At the start of any session in a new project, check for `.lupeignore` and
+`.lupeshared`. If either is missing, detect the stack and create them.
+
+Detect stack: `package.json` → Node, `Cargo.toml` → Rust, `requirements.txt`/
+`pyproject.toml` → Python, `go.mod` → Go, `pom.xml`/`build.gradle` → Java.
+
+**`.lupeignore`** — what lupe does NOT snapshot. Auto-created on first
+`lupe prompt` with generic defaults, but you should create it early with
+stack-specific content (e.g. `dist`, `.next`, `__pycache__`).
+
+**`.lupeshared`** — what gets symlinked instead of copied into `lupe workspace`
+forks. List expensive-to-reinstall dirs: `node_modules`, `target`, `.venv`.
+Only include entries that exist in the project.
+
 ## Workflow
 
 At the start of every user request that may modify files, run:
