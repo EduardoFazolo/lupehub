@@ -73,6 +73,7 @@ current state if there is any useful work to preserve.
 
 ```bash
 lupe status
+lupe install
 lupe prompt "full user prompt"
 lupe checkpoint "task summary" --prompt "full user prompt"
 lupe save "save summary"
@@ -86,6 +87,7 @@ lupe diff <save-a-uuid> <save-b-uuid>
 lupe restore <save-uuid>
 lupe respond "full agent response"
 lupe install-agent
+lupe install-hooks
 ```
 
 Storage starts automatically. If Lupe finds `.lupe` in the current directory or
@@ -93,8 +95,9 @@ a parent, it uses that project store. If not, it creates `.lupe` in the current
 workspace. `lupe status` shows the active database/object-store paths and mode.
 Use `LUPE_HOME` or `--home` to override the storage location.
 
+`lupe install` configures the current workspace and wires agent stop hooks.
 `lupe install-agent` writes or appends Lupe instructions to `AGENTS.md` in the
-current workspace.
+current workspace. `lupe install-hooks` only wires stop hooks.
 
 ## Keep This Updated
 
@@ -125,12 +128,15 @@ and before restore/destructive operations.
 Useful commands:
 
 ```bash
+lupe install
 lupe history
 lupe prompts
 lupe saves
 lupe search "<topic>"
 lupe diff <from-save-uuid> <to-save-uuid>
 lupe restore <save-uuid>
+lupe install-agent
+lupe install-hooks
 ```
 
 Lupe does not automatically see prompts unless the agent or host calls Lupe.

@@ -83,6 +83,16 @@ enum Command {
     Respond {
         response: String,
     },
+    Install {
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
+        #[arg(long)]
+        lupe_bin: Option<PathBuf>,
+        #[arg(long)]
+        no_agent: bool,
+        #[arg(long)]
+        no_hooks: bool,
+    },
     InstallAgent {
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
@@ -93,7 +103,10 @@ enum Command {
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
     },
-    InstallHooks,
+    InstallHooks {
+        #[arg(long)]
+        lupe_bin: Option<PathBuf>,
+    },
     Status,
 }
 
@@ -202,7 +215,9 @@ async fn main() -> Result<()> {
             let workspace = absolutize(workspace)?;
             let title = title.unwrap_or_else(|| title_from_prompt(&prompt));
             let agent = detect_agent(agent);
-            let (checkpoint, save) = store.create_checkpoint(title, prompt, agent, &workspace).await?;
+            let (checkpoint, save) = store
+                .create_checkpoint(title, prompt, agent, &workspace)
+                .await?;
             println!(
                 "prompt {} ({}) {}",
                 short_id(checkpoint.id),
@@ -226,7 +241,9 @@ async fn main() -> Result<()> {
         } => {
             let workspace = absolutize(workspace)?;
             let agent = detect_agent(agent);
-            let (checkpoint, save) = store.create_checkpoint(title, prompt, agent, &workspace).await?;
+            let (checkpoint, save) = store
+                .create_checkpoint(title, prompt, agent, &workspace)
+                .await?;
             println!(
                 "checkpoint {} ({}) {}",
                 short_id(checkpoint.id),
@@ -267,7 +284,10 @@ async fn main() -> Result<()> {
                 if let Some(agent) = &checkpoint.agent {
                     println!("  agent: {agent}");
                 }
-                println!("  prompt: {}", one_line(checkpoint.prompt.as_deref().unwrap_or("")));
+                println!(
+                    "  prompt: {}",
+                    one_line(checkpoint.prompt.as_deref().unwrap_or(""))
+                );
             }
         }
         Command::Saves { checkpoint } => {
@@ -336,9 +356,8 @@ async fn main() -> Result<()> {
                 if index > 0 {
                     println!("{}", colors.dim("│"));
                 }
-                let is_head_checkpoint = head_save.is_some()
-                    && index == 0
-                    && main_chain_set.contains(&checkpoint.id);
+                let is_head_checkpoint =
+                    head_save.is_some() && index == 0 && main_chain_set.contains(&checkpoint.id);
                 let head_marker = if is_head_checkpoint { " [HEAD]" } else { "" };
                 println!(
                     "{} {} {} {}{}",
@@ -355,23 +374,33 @@ async fn main() -> Result<()> {
                     one_line(checkpoint.prompt.as_deref().unwrap_or(""))
                 );
                 if let Some(agent) = &checkpoint.agent {
-                    println!(
-                        "{} {} {}",
-                        colors.dim("│"),
-                        colors.dim("agent:"),
-                        agent
-                    );
+                    println!("{} {} {}", colors.dim("│"), colors.dim("agent:"), agent);
                 }
 
                 let saves = store.list_saves(Some(checkpoint.id)).await?;
                 for (save_index, save) in saves.iter().enumerate() {
                     // Check if any dead branches fork from this save
-                    let dead_children = forks_from.get(&save.id).map(|v| v.as_slice()).unwrap_or(&[]);
+                    let dead_children = forks_from
+                        .get(&save.id)
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[]);
                     let has_dead = !dead_children.is_empty();
                     let is_last_save = save_index + 1 == saves.len();
-                    let branch = if is_last_save && !has_dead { "└─" } else { "├─" };
-                    let label = if save.sequence == 0 { "initial" } else { "save" };
-                    let head_marker = if head_save == Some(save.id) { " ◄ HEAD" } else { "" };
+                    let branch = if is_last_save && !has_dead {
+                        "└─"
+                    } else {
+                        "├─"
+                    };
+                    let label = if save.sequence == 0 {
+                        "initial"
+                    } else {
+                        "save"
+                    };
+                    let head_marker = if head_save == Some(save.id) {
+                        " ◄ HEAD"
+                    } else {
+                        ""
+                    };
                     println!(
                         "{} {} {} {} {} {} {}{}",
                         colors.dim(branch),
@@ -387,7 +416,11 @@ async fn main() -> Result<()> {
                     // Render dead branches forking from this save
                     for (di, dead) in dead_children.iter().enumerate() {
                         let is_last_dead = di + 1 == dead_children.len();
-                        let pipe = if is_last_save && is_last_dead { " " } else { "│" };
+                        let pipe = if is_last_save && is_last_dead {
+                            " "
+                        } else {
+                            "│"
+                        };
                         println!("{}", colors.dim(&format!("{pipe}  │")));
                         println!(
                             "{}",
@@ -407,8 +440,16 @@ async fn main() -> Result<()> {
                         );
                         let dead_saves = store.list_saves(Some(dead.id)).await?;
                         for (dsi, dsave) in dead_saves.iter().enumerate() {
-                            let dlabel = if dsave.sequence == 0 { "initial" } else { "save" };
-                            let dbranch = if dsi + 1 == dead_saves.len() { "└─" } else { "├─" };
+                            let dlabel = if dsave.sequence == 0 {
+                                "initial"
+                            } else {
+                                "save"
+                            };
+                            let dbranch = if dsi + 1 == dead_saves.len() {
+                                "└─"
+                            } else {
+                                "├─"
+                            };
                             println!(
                                 "{}",
                                 colors.dead(&format!(
@@ -484,8 +525,30 @@ async fn main() -> Result<()> {
             };
             git_push(&workspace, &msg)?;
         }
-        Command::InstallHooks => {
-            install_hooks()?;
+        Command::Install {
+            workspace,
+            lupe_bin,
+            no_agent,
+            no_hooks,
+        } => {
+            if no_agent && no_hooks {
+                bail!("nothing to install: remove either --no-agent or --no-hooks");
+            }
+            let workspace = absolutize(workspace)?;
+            if !no_agent {
+                let path = install_agent_instructions(&workspace)?;
+                println!("agent       -> {}", path.display());
+            }
+            if !no_hooks {
+                let lupe_bin = resolve_lupe_bin(lupe_bin)?;
+                install_hooks(&lupe_bin)?;
+            }
+            println!("done. restart your agents to pick up new hooks.");
+        }
+        Command::InstallHooks { lupe_bin } => {
+            let lupe_bin = resolve_lupe_bin(lupe_bin)?;
+            install_hooks(&lupe_bin)?;
+            println!("done. restart your agents to pick up new hooks.");
         }
         Command::InstallAgent { workspace } => {
             let workspace = absolutize(workspace)?;
@@ -678,13 +741,14 @@ impl Store {
         let mut current_save = self.read_head();
         loop {
             let Some(save_id) = current_save else { break };
-            let checkpoint_id: Option<String> = sqlx::query_scalar(
-                "select checkpoint_id from saves where id = ?1",
-            )
-            .bind(save_id.to_string())
-            .fetch_optional(&self.pool)
-            .await?;
-            let Some(checkpoint_id) = checkpoint_id else { break };
+            let checkpoint_id: Option<String> =
+                sqlx::query_scalar("select checkpoint_id from saves where id = ?1")
+                    .bind(save_id.to_string())
+                    .fetch_optional(&self.pool)
+                    .await?;
+            let Some(checkpoint_id) = checkpoint_id else {
+                break;
+            };
             let checkpoint_id = parse_uuid(checkpoint_id)?;
             if result.contains(&checkpoint_id) {
                 break;
@@ -878,12 +942,11 @@ impl Store {
 
     async fn latest_checkpoint_id(&self) -> Result<Uuid> {
         if let Some(head) = self.read_head() {
-            let id: Option<String> = sqlx::query_scalar(
-                "select checkpoint_id from saves where id = ?1",
-            )
-            .bind(head.to_string())
-            .fetch_optional(&self.pool)
-            .await?;
+            let id: Option<String> =
+                sqlx::query_scalar("select checkpoint_id from saves where id = ?1")
+                    .bind(head.to_string())
+                    .fetch_optional(&self.pool)
+                    .await?;
             if let Some(id) = id {
                 return parse_uuid(id);
             }
@@ -992,11 +1055,10 @@ async fn bootstrap_head_if_missing(store: &Store) -> Result<()> {
     if store.head_path().exists() {
         return Ok(());
     }
-    let latest: Option<String> = sqlx::query_scalar(
-        "select id from saves order by created_at desc limit 1",
-    )
-    .fetch_optional(&store.pool)
-    .await?;
+    let latest: Option<String> =
+        sqlx::query_scalar("select id from saves order by created_at desc limit 1")
+            .fetch_optional(&store.pool)
+            .await?;
     if let Some(id) = latest {
         let uuid = parse_uuid(id)?;
         store.write_head(uuid)?;
@@ -1263,7 +1325,37 @@ impl Colors {
     }
 }
 
-fn install_hooks() -> Result<()> {
+fn resolve_lupe_bin(lupe_bin: Option<PathBuf>) -> Result<PathBuf> {
+    let path = match lupe_bin {
+        Some(path) => path,
+        None => std::env::current_exe().context("failed to resolve current lupe executable")?,
+    };
+    let path = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    path.canonicalize()
+        .with_context(|| format!("lupe binary not found: {}", path.display()))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn shell_quote_path(path: &FsPath) -> String {
+    shell_quote(&path.to_string_lossy())
+}
+
+fn hook_command(lupe_bin: &FsPath, script_dest: &FsPath) -> String {
+    format!(
+        "LUPE_BIN={} python3 {}",
+        shell_quote_path(lupe_bin),
+        shell_quote_path(script_dest)
+    )
+}
+
+fn install_hooks(lupe_bin: &FsPath) -> Result<()> {
     let home_dir = std::env::var("HOME").context("HOME not set")?;
     let hooks_dir = PathBuf::from(&home_dir).join(".lupe").join("hooks");
     fs::create_dir_all(&hooks_dir)?;
@@ -1282,57 +1374,76 @@ fn install_hooks() -> Result<()> {
         fs::set_permissions(&script_dest, perms)?;
     }
     println!("hook script -> {}", script_dest.display());
+    println!("lupe binary -> {}", lupe_bin.display());
 
-    let hook_cmd = format!("python3 {}", script_dest.display());
+    let hook_cmd = hook_command(lupe_bin, &script_dest);
 
     // Claude Code: ~/.claude/settings.json
-    let claude_settings = PathBuf::from(&home_dir).join(".claude").join("settings.json");
+    let claude_settings = PathBuf::from(&home_dir)
+        .join(".claude")
+        .join("settings.json");
+    let claude_entry = serde_json::json!({
+        "hooks": [{"type": "command", "command": hook_cmd.clone()}]
+    });
     if claude_settings.exists() {
         let content = fs::read_to_string(&claude_settings)?;
         let mut val: serde_json::Value = serde_json::from_str(&content)?;
         let stop = val
             .pointer_mut("/hooks/Stop")
             .and_then(|v| v.as_array_mut());
-        let entry = serde_json::json!({
-            "hooks": [{"type": "command", "command": hook_cmd}]
-        });
         if let Some(arr) = stop {
-            let already = arr.iter().any(|e| {
+            let existing = arr.iter_mut().find(|e| {
                 e.pointer("/hooks/0/command")
                     .and_then(|v| v.as_str())
                     .map(|s| s.contains("lupe"))
                     .unwrap_or(false)
             });
-            if !already {
-                arr.push(entry);
+            if let Some(existing) = existing {
+                existing["hooks"][0]["command"] = serde_json::json!(hook_cmd.clone());
+            } else {
+                arr.push(claude_entry);
             }
         } else {
-            val["hooks"]["Stop"] = serde_json::json!([entry]);
+            if !val.get("hooks").map(|v| v.is_object()).unwrap_or(false) {
+                val["hooks"] = serde_json::json!({});
+            }
+            val["hooks"]["Stop"] = serde_json::json!([claude_entry]);
         }
         fs::write(&claude_settings, serde_json::to_string_pretty(&val)?)?;
         println!("claude code  -> {}", claude_settings.display());
     } else {
-        println!("claude code  -> not found ({})", claude_settings.display());
+        if let Some(parent) = claude_settings.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let val = serde_json::json!({
+            "hooks": {
+                "Stop": [claude_entry]
+            }
+        });
+        fs::write(&claude_settings, serde_json::to_string_pretty(&val)?)?;
+        println!("claude code  -> {}", claude_settings.display());
     }
 
     // Codex: ~/.codex/hooks.json
     let codex_hooks = PathBuf::from(&home_dir).join(".codex").join("hooks.json");
     let codex_entry = serde_json::json!({
-        "Stop": [{"command": hook_cmd}]
+        "Stop": [{"command": hook_cmd.clone()}]
     });
     if codex_hooks.exists() {
         let content = fs::read_to_string(&codex_hooks)?;
         let mut val: serde_json::Value = serde_json::from_str(&content)?;
         let stop = val.pointer_mut("/Stop").and_then(|v| v.as_array_mut());
-        let entry = serde_json::json!({"command": hook_cmd});
+        let entry = serde_json::json!({"command": hook_cmd.clone()});
         if let Some(arr) = stop {
-            let already = arr.iter().any(|e| {
+            let existing = arr.iter_mut().find(|e| {
                 e.get("command")
                     .and_then(|v| v.as_str())
                     .map(|s| s.contains("lupe"))
                     .unwrap_or(false)
             });
-            if !already {
+            if let Some(existing) = existing {
+                existing["command"] = serde_json::json!(hook_cmd.clone());
+            } else {
                 arr.push(entry);
             }
         } else {
@@ -1340,6 +1451,9 @@ fn install_hooks() -> Result<()> {
         }
         fs::write(&codex_hooks, serde_json::to_string_pretty(&val)?)?;
     } else {
+        if let Some(parent) = codex_hooks.parent() {
+            fs::create_dir_all(parent)?;
+        }
         fs::write(&codex_hooks, serde_json::to_string_pretty(&codex_entry)?)?;
     }
     println!("codex        -> {}", codex_hooks.display());
@@ -1347,21 +1461,23 @@ fn install_hooks() -> Result<()> {
     // Cursor: ~/.cursor/hooks.json
     let cursor_hooks = PathBuf::from(&home_dir).join(".cursor").join("hooks.json");
     let cursor_entry = serde_json::json!({
-        "stop": [{"command": hook_cmd}]
+        "stop": [{"command": hook_cmd.clone()}]
     });
     if cursor_hooks.exists() {
         let content = fs::read_to_string(&cursor_hooks)?;
         let mut val: serde_json::Value = serde_json::from_str(&content)?;
         let stop = val.pointer_mut("/stop").and_then(|v| v.as_array_mut());
-        let entry = serde_json::json!({"command": hook_cmd});
+        let entry = serde_json::json!({"command": hook_cmd.clone()});
         if let Some(arr) = stop {
-            let already = arr.iter().any(|e| {
+            let existing = arr.iter_mut().find(|e| {
                 e.get("command")
                     .and_then(|v| v.as_str())
                     .map(|s| s.contains("lupe"))
                     .unwrap_or(false)
             });
-            if !already {
+            if let Some(existing) = existing {
+                existing["command"] = serde_json::json!(hook_cmd.clone());
+            } else {
                 arr.push(entry);
             }
         } else {
@@ -1369,11 +1485,13 @@ fn install_hooks() -> Result<()> {
         }
         fs::write(&cursor_hooks, serde_json::to_string_pretty(&val)?)?;
     } else {
+        if let Some(parent) = cursor_hooks.parent() {
+            fs::create_dir_all(parent)?;
+        }
         fs::write(&cursor_hooks, serde_json::to_string_pretty(&cursor_entry)?)?;
     }
     println!("cursor       -> {}", cursor_hooks.display());
 
-    println!("done. restart your agents to pick up new hooks.");
     Ok(())
 }
 
@@ -1419,14 +1537,18 @@ and before restore/destructive operations.
 Useful commands:
 
 ```bash
+lupe install
 lupe history
 lupe prompts
 lupe saves
 lupe search "<topic>"
 lupe diff <from-save-uuid> <to-save-uuid>
 lupe restore <save-uuid>
+lupe install-agent
+lupe install-hooks
 ```
 
+`lupe install` configures the current workspace and wires agent stop hooks.
 Lupe does not automatically see prompts unless the agent or host calls Lupe.
 This file is the contract that tells agents when to call it.
 <!-- /lupe-agent-workflow -->
@@ -1477,5 +1599,29 @@ fn title_from_prompt(prompt: &str) -> String {
         } else {
             title
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_quote_handles_spaces_and_single_quotes() {
+        assert_eq!(shell_quote("plain"), "'plain'");
+        assert_eq!(shell_quote("two words"), "'two words'");
+        assert_eq!(shell_quote("ed's lupe"), "'ed'\\''s lupe'");
+    }
+
+    #[test]
+    fn hook_command_exports_lupe_bin() {
+        let cmd = hook_command(
+            FsPath::new("/tmp/Lupe Bin/lupe"),
+            FsPath::new("/tmp/lupe hooks/stop.py"),
+        );
+        assert_eq!(
+            cmd,
+            "LUPE_BIN='/tmp/Lupe Bin/lupe' python3 '/tmp/lupe hooks/stop.py'"
+        );
     }
 }
