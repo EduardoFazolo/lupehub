@@ -77,6 +77,23 @@ target
 Only include entries that actually exist in the project. Ask the user to confirm
 before writing if you are unsure about the stack.
 
+## When to Create a Workspace
+
+Create a workspace proactively — without waiting for the user to ask — when:
+
+- User wants to try two different approaches to the same problem
+- User says "test this in isolation", "try this separately", "don't break what's working"
+- You are about to make large, risky, or experimental changes to files the user is actively using
+- User asks you to implement a feature while another agent is working on the same codebase
+- You are exploring an approach you are not confident about
+
+Workflow:
+1. `lupe save "stable state before experiment"` — snapshot current state
+2. `lupe workspace new "<descriptive-name>"` — create isolated workspace
+3. Tell the user the path so they can open it / run the app there
+4. Do the experimental work inside the workspace
+5. If it works: user promotes it. If not: `lupe workspace drop <name>`, no damage done.
+
 ## Required Agent Behavior
 
 The stop hook auto-captures every user message and agent response.
