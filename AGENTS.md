@@ -1,4 +1,5 @@
 # Lupe Agent Workflow
+<!-- test comment to trigger a diff — second edit -->
 
 Lupe is agent-native source control. It is not Git, and it does not use GitHub,
 Docker, Postgres, or a server in the current implementation.
@@ -66,6 +67,16 @@ lupe diff <from-save-uuid> <to-save-uuid>
 lupe restore <save-uuid>
 ```
 
+**Never revert or undo work by manually editing or deleting files.** When dropping
+a feature, rolling back a change, or abandoning an approach, always use
+`lupe restore` to move HEAD to the pre-feature save. This preserves the dropped
+work as a dead branch visible in `lupe graph`.
+
+Workflow for dropping a feature:
+1. `lupe save "feature complete before drop"` — preserve the current state
+2. `lupe saves` — find the save taken before the feature was started
+3. `lupe restore <pre-feature-save-uuid>` — move HEAD back
+
 Before using `lupe restore`, inspect the target save and create a new save of the
 current state if there is any useful work to preserve.
 
@@ -86,12 +97,19 @@ lupe diff <save-a-uuid> <save-b-uuid>
 lupe restore <save-uuid>
 lupe respond "full agent response"
 lupe install-agent
+lupe author
+lupe author --name "Your Name" --email "your@email.com"
 ```
 
 Storage starts automatically. If Lupe finds `.lupe` in the current directory or
 a parent, it uses that project store. If not, it creates `.lupe` in the current
 workspace. `lupe status` shows the active database/object-store paths and mode.
 Use `LUPE_HOME` or `--home` to override the storage location.
+
+`lupe author` reads the current author name and email for this project store.
+`lupe author --name X --email Y` sets them (both optional; partial updates OK).
+If author is not configured when starting a session, ask the user for name and
+email and set them with `lupe author --name "..." --email "..."`.
 
 `lupe install-agent` writes or appends Lupe instructions to `AGENTS.md` in the
 current workspace.

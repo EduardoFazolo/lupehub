@@ -95,6 +95,12 @@ enum Command {
     },
     InstallHooks,
     Status,
+    Author {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        email: Option<String>,
+    },
 }
 
 struct Store {
@@ -161,6 +167,12 @@ struct Snapshot {
     root_hash: String,
     file_count: i64,
     manifest: Manifest,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct AuthorConfig {
+    name: Option<String>,
+    email: Option<String>,
 }
 
 fn detect_agent(override_val: Option<String>) -> String {
@@ -261,7 +273,7 @@ async fn main() -> Result<()> {
                     "{} ({})  {}  {}",
                     short_id(checkpoint.id),
                     checkpoint.id,
-                    checkpoint.created_at.format("%Y-%m-%d %H:%M:%S"),
+                    friendly_time(checkpoint.created_at),
                     checkpoint.title,
                 );
                 if let Some(agent) = &checkpoint.agent {
@@ -279,7 +291,7 @@ async fn main() -> Result<()> {
                     short_id(save.checkpoint_id),
                     save.sequence,
                     save.file_count,
-                    save.created_at.format("%Y-%m-%d %H:%M:%S"),
+                    friendly_time(save.created_at),
                     save.message.unwrap_or_default()
                 );
             }
@@ -290,7 +302,7 @@ async fn main() -> Result<()> {
                     "{} ({})  {}  {}",
                     short_id(checkpoint.id),
                     checkpoint.id,
-                    checkpoint.created_at.format("%Y-%m-%d %H:%M:%S"),
+                    friendly_time(checkpoint.created_at),
                     checkpoint.title
                 );
                 if let Some(agent) = checkpoint.agent {
@@ -341,10 +353,11 @@ async fn main() -> Result<()> {
                     && main_chain_set.contains(&checkpoint.id);
                 let head_marker = if is_head_checkpoint { " [HEAD]" } else { "" };
                 println!(
-                    "{} {} {} {}{}",
+                    "{} {} {} {} {}{}",
                     colors.checkpoint("◆"),
                     colors.checkpoint(&format!("checkpoint {}", short_id(checkpoint.id))),
                     colors.dim(&format!("({})", checkpoint.id)),
+                    colors.dim(&friendly_time(checkpoint.created_at)),
                     colors.bold(&checkpoint.title),
                     head_marker,
                 );
@@ -364,6 +377,26 @@ async fn main() -> Result<()> {
                 }
 
                 let saves = store.list_saves(Some(checkpoint.id)).await?;
+
+                // Checkpoint overall diff: first save → last save
+                if saves.len() >= 2 {
+                    let first = saves.first().unwrap();
+                    let last = saves.last().unwrap();
+                    let overall = store.diff_saves(first.id, last.id).await?;
+                    let total = overall.added.len() + overall.modified.len() + overall.removed.len();
+                    if total > 0 {
+                        println!(
+                            "{} {} +{} ~{} -{} overall",
+                            colors.dim("│"),
+                            colors.dim("changes:"),
+                            overall.added.len(),
+                            overall.modified.len(),
+                            overall.removed.len(),
+                        );
+                        print_diff_lines(&overall, &colors, &colors.dim("│"), "  ");
+                    }
+                }
+
                 for (save_index, save) in saves.iter().enumerate() {
                     // Check if any dead branches fork from this save
                     let dead_children = forks_from.get(&save.id).map(|v| v.as_slice()).unwrap_or(&[]);
@@ -383,6 +416,18 @@ async fn main() -> Result<()> {
                         save.message.as_deref().unwrap_or(""),
                         head_marker,
                     );
+
+                    // Per-save diff: show what changed vs previous save
+                    if save.sequence > 0 {
+                        let prev = &saves[save_index - 1];
+                        let save_diff = store.diff_saves(prev.id, save.id).await?;
+                        let pipe = if is_last_save && !has_dead {
+                            colors.dim(" ")
+                        } else {
+                            colors.dim("│")
+                        };
+                        print_diff_lines(&save_diff, &colors, &pipe, "     ");
+                    }
 
                     // Render dead branches forking from this save
                     for (di, dead) in dead_children.iter().enumerate() {
@@ -456,7 +501,7 @@ async fn main() -> Result<()> {
                     short_id(result.id),
                     result.id,
                     checkpoint,
-                    result.created_at.format("%Y-%m-%d %H:%M:%S"),
+                    friendly_time(result.created_at),
                     result.title
                 );
                 if let Some(detail) = result.detail {
@@ -498,6 +543,44 @@ async fn main() -> Result<()> {
             println!("home {}", store.home.display());
             println!("database {}", store.home.join("lupe.db").display());
             println!("objects {}", store.object_dir.display());
+            let author = store.read_author();
+            match (author.name.as_deref(), author.email.as_deref()) {
+                (Some(n), Some(e)) => println!("author {n} <{e}>"),
+                (Some(n), None) => println!("author {n} <email not set>"),
+                (None, Some(e)) => println!("author <name not set> <{e}>"),
+                (None, None) => println!("author not configured"),
+            }
+        }
+        Command::Author { name, email } => {
+            let mut author = store.read_author();
+            let setting = name.is_some() || email.is_some();
+            if let Some(n) = name {
+                author.name = Some(n);
+            }
+            if let Some(e) = email {
+                author.email = Some(e);
+            }
+            if setting {
+                store.write_author(&author)?;
+            }
+            match (author.name.as_deref(), author.email.as_deref()) {
+                (Some(n), Some(e)) => {
+                    println!("name  {n}");
+                    println!("email {e}");
+                }
+                (Some(n), None) => {
+                    println!("name  {n}");
+                    println!("email (not set)");
+                }
+                (None, Some(e)) => {
+                    println!("name  (not set)");
+                    println!("email {e}");
+                }
+                (None, None) => {
+                    println!("author not configured");
+                    println!("set with: lupe author --name \"Your Name\" --email \"your@email.com\"");
+                }
+            }
         }
     }
 
@@ -792,32 +875,73 @@ impl Store {
         match (from, to) {
             (Some(from), Some(to)) => Ok((from, to)),
             (None, None) => self.latest_two_saves_in_latest_checkpoint().await,
-            _ => bail!("provide both FROM and TO, or no arguments for the current diff"),
+            (Some(to), None) => {
+                let row: Option<(String, i64)> = sqlx::query_as(
+                    "select checkpoint_id, sequence from saves where id = ?1",
+                )
+                .bind(to.to_string())
+                .fetch_optional(&self.pool)
+                .await?;
+                let (checkpoint_id, sequence) = row
+                    .ok_or_else(|| anyhow!("save {to} not found"))?;
+                if sequence == 0 {
+                    bail!("save {to} is the first save in its checkpoint — nothing before it");
+                }
+                let from: String = sqlx::query_scalar(
+                    "select id from saves where checkpoint_id = ?1 and sequence = ?2",
+                )
+                .bind(&checkpoint_id)
+                .bind(sequence - 1)
+                .fetch_one(&self.pool)
+                .await?;
+                Ok((parse_uuid(from)?, to))
+            }
+            (None, Some(_)) => bail!("provide a single save uuid, two uuids, or no arguments"),
         }
     }
 
     async fn latest_two_saves_in_latest_checkpoint(&self) -> Result<(Uuid, Uuid)> {
         let checkpoint_id = self.latest_checkpoint_id().await?;
         let rows = sqlx::query(
-            r#"
-            select id
-            from saves
-            where checkpoint_id = ?1
-            order by sequence desc
-            limit 2
-            "#,
+            "select id from saves where checkpoint_id = ?1 order by sequence desc limit 2",
         )
         .bind(checkpoint_id.to_string())
         .fetch_all(&self.pool)
         .await?;
 
-        if rows.len() < 2 {
-            bail!("current checkpoint has fewer than two saves; run `lupe save` first");
+        if rows.len() >= 2 {
+            let to = parse_uuid(rows[0].try_get::<String, _>("id")?)?;
+            let from = parse_uuid(rows[1].try_get::<String, _>("id")?)?;
+            return Ok((from, to));
         }
 
-        let to = parse_uuid(rows[0].try_get::<String, _>("id")?)?;
-        let from = parse_uuid(rows[1].try_get::<String, _>("id")?)?;
-        Ok((from, to))
+        // Single save in current checkpoint — compare HEAD to previous checkpoint's last save
+        let head = rows
+            .into_iter()
+            .next()
+            .map(|r| r.try_get::<String, _>("id"))
+            .transpose()?
+            .ok_or_else(|| anyhow!("no saves found"))?;
+        let to = parse_uuid(head)?;
+
+        let prev: Option<String> = sqlx::query_scalar(
+            r#"
+            select s.id from saves s
+            join checkpoints c on c.id = s.checkpoint_id
+            where c.id != ?1
+              and s.created_at < (select created_at from saves where id = ?2)
+            order by s.created_at desc
+            limit 1
+            "#,
+        )
+        .bind(checkpoint_id.to_string())
+        .bind(to.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let from = prev
+            .ok_or_else(|| anyhow!("only one save exists; nothing to compare against"))?;
+        Ok((parse_uuid(from)?, to))
     }
 
     async fn restore_save(&self, id: Uuid, workspace: &FsPath) -> Result<SaveView> {
@@ -894,6 +1018,22 @@ impl Store {
                 .await?;
         id.ok_or_else(|| anyhow!("no checkpoint exists; run `lupe checkpoint <title>` first"))
             .and_then(parse_uuid)
+    }
+
+    fn author_path(&self) -> PathBuf {
+        self.home.join("author.json")
+    }
+
+    fn read_author(&self) -> AuthorConfig {
+        fs::read_to_string(self.author_path())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    fn write_author(&self, author: &AuthorConfig) -> Result<()> {
+        fs::write(self.author_path(), serde_json::to_string_pretty(author)?)?;
+        Ok(())
     }
 
     async fn get_save(&self, id: Uuid) -> Result<SaveView> {
@@ -1254,6 +1394,18 @@ impl Colors {
         self.paint("2;33", value)
     }
 
+    fn added(&self, value: &str) -> String {
+        self.paint("32", value)
+    }
+
+    fn modified(&self, value: &str) -> String {
+        self.paint("33", value)
+    }
+
+    fn removed(&self, value: &str) -> String {
+        self.paint("31", value)
+    }
+
     fn paint(&self, code: &str, value: &str) -> String {
         if self.enabled {
             format!("\x1b[{code}m{value}\x1b[0m")
@@ -1431,6 +1583,48 @@ Lupe does not automatically see prompts unless the agent or host calls Lupe.
 This file is the contract that tells agents when to call it.
 <!-- /lupe-agent-workflow -->
 "#
+}
+
+fn print_diff_lines(diff: &DiffView, colors: &Colors, pipe: &str, indent: &str) {
+    const MAX: usize = 8;
+    let mut lines: Vec<String> = Vec::new();
+    for f in &diff.added   { lines.push(colors.added  (&format!("+ {f}"))); }
+    for f in &diff.modified{ lines.push(colors.modified(&format!("~ {f}"))); }
+    for f in &diff.removed { lines.push(colors.removed (&format!("- {f}"))); }
+    let total = lines.len();
+    let shown = lines.into_iter().take(MAX);
+    for line in shown {
+        println!("{}{}{}", pipe, indent, line);
+    }
+    if total > MAX {
+        println!("{}{}{}",
+            pipe, indent,
+            colors.dim(&format!("... +{} more", total - MAX))
+        );
+    }
+}
+
+fn ordinal(day: u32) -> &'static str {
+    match (day % 100, day % 10) {
+        (11..=13, _) => "th",
+        (_, 1) => "st",
+        (_, 2) => "nd",
+        (_, 3) => "rd",
+        _ => "th",
+    }
+}
+
+fn friendly_time(dt: DateTime<Utc>) -> String {
+    let day = dt.format("%-d").to_string().parse::<u32>().unwrap_or(0);
+    format!(
+        "{}, {} - {} {}{} {}",
+        dt.format("%I:%M %p"),
+        dt.format("%a"),
+        dt.format("%B"),
+        day,
+        ordinal(day),
+        dt.format("%Y"),
+    )
 }
 
 fn one_line(value: &str) -> String {
