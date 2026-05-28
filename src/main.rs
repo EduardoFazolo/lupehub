@@ -36,6 +36,8 @@ enum Command {
         agent: Option<String>,
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
+        #[arg(long)]
+        private: bool,
     },
     Checkpoint {
         title: String,
@@ -120,6 +122,7 @@ enum Command {
         #[command(subcommand)]
         action: WorkspaceAction,
     },
+    Private,
     Author {
         #[arg(long)]
         name: Option<String>,
@@ -163,6 +166,7 @@ struct CheckpointView {
     agent: Option<String>,
     parent_save_id: Option<Uuid>,
     created_at: DateTime<Utc>,
+    private: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -256,6 +260,7 @@ async fn main() -> Result<()> {
             prev_response,
             agent,
             workspace,
+            private,
         } => {
             if let Some(response) = prev_response {
                 if let Ok(prev_id) = store.latest_checkpoint_id().await {
@@ -267,7 +272,7 @@ async fn main() -> Result<()> {
             let title = title.unwrap_or_else(|| title_from_prompt(&prompt));
             let agent = detect_agent(agent);
             let (checkpoint, save) = store
-                .create_checkpoint(title, prompt, agent, &workspace)
+                .create_checkpoint(title, prompt, agent, &workspace, private)
                 .await?;
             println!(
                 "prompt {} ({}) {}",
@@ -293,7 +298,7 @@ async fn main() -> Result<()> {
             let workspace = absolutize(workspace)?;
             let agent = detect_agent(agent);
             let (checkpoint, save) = store
-                .create_checkpoint(title, prompt, agent, &workspace)
+                .create_checkpoint(title, prompt, agent, &workspace, false)
                 .await?;
             println!(
                 "checkpoint {} ({}) {}",
@@ -324,7 +329,7 @@ async fn main() -> Result<()> {
             );
         }
         Command::History { all } => {
-            for checkpoint in store.list_checkpoints(all).await? {
+            for checkpoint in store.list_checkpoints(all, false).await? {
                 println!(
                     "{} ({})  {}  {}",
                     short_id(checkpoint.id),
@@ -356,7 +361,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Prompts { all } => {
-            for checkpoint in store.list_checkpoints(all).await? {
+            for checkpoint in store.list_checkpoints(all, false).await? {
                 println!(
                     "{} ({})  {}  {}",
                     short_id(checkpoint.id),
@@ -382,14 +387,14 @@ async fn main() -> Result<()> {
                 main_chain_ids.iter().copied().collect();
 
             // All checkpoints needed to render the graph
-            let checkpoints = store.list_checkpoints(all).await?;
+            let checkpoints = store.list_checkpoints(all, false).await?;
             if checkpoints.is_empty() {
                 println!("no checkpoints yet");
                 return Ok(());
             }
 
             // Build map: save_id → dead-branch checkpoints forking from it
-            let all_checkpoints_for_forks = store.list_checkpoints(true).await?;
+            let all_checkpoints_for_forks = store.list_checkpoints(true, false).await?;
             let mut forks_from: std::collections::HashMap<Uuid, Vec<&CheckpointView>> =
                 std::collections::HashMap::new();
             // We need to own the vec for lifetime reasons — collect all non-main checkpoints
@@ -412,23 +417,40 @@ async fn main() -> Result<()> {
                 let is_head_checkpoint =
                     head_save.is_some() && Some(checkpoint.id) == head_checkpoint_id;
                 let head_marker = if is_head_checkpoint { " [HEAD]" } else { "" };
+                let title_display = if checkpoint.private {
+                    colors.dim("[private]")
+                } else {
+                    colors.bold(&checkpoint.title)
+                };
+                let checkpoint_sym = if checkpoint.private {
+                    colors.dim("◆")
+                } else {
+                    colors.checkpoint("◆")
+                };
                 println!(
                     "{} {} {} {} {}{}",
-                    colors.checkpoint("◆"),
+                    checkpoint_sym,
                     colors.checkpoint(&format!("checkpoint {}", short_id(checkpoint.id))),
                     colors.dim(&format!("({})", checkpoint.id)),
                     colors.dim(&friendly_time(checkpoint.created_at)),
-                    colors.bold(&checkpoint.title),
+                    title_display,
                     head_marker,
                 );
+                let prompt_display = if checkpoint.private {
+                    "[private]".to_string()
+                } else {
+                    one_line(checkpoint.prompt.as_deref().unwrap_or(""))
+                };
                 println!(
                     "{} {} {}",
                     colors.dim("│"),
                     colors.dim("prompt:"),
-                    one_line(checkpoint.prompt.as_deref().unwrap_or(""))
+                    prompt_display
                 );
-                if let Some(agent) = &checkpoint.agent {
-                    println!("{} {} {}", colors.dim("│"), colors.dim("agent:"), agent);
+                if !checkpoint.private {
+                    if let Some(agent) = &checkpoint.agent {
+                        println!("{} {} {}", colors.dim("│"), colors.dim("agent:"), agent);
+                    }
                 }
 
                 let saves = store.list_saves(Some(checkpoint.id)).await?;
@@ -606,7 +628,7 @@ async fn main() -> Result<()> {
                 Some(m) => m,
                 None => {
                     let checkpoint = store
-                        .list_checkpoints(false)
+                        .list_checkpoints(false, false)
                         .await?
                         .into_iter()
                         .next()
@@ -709,6 +731,11 @@ async fn main() -> Result<()> {
                 println!("workspace '{name}' dropped");
             }
         },
+        Command::Private => {
+            let checkpoint_id = store.latest_checkpoint_id().await?;
+            store.mark_private(checkpoint_id).await?;
+            println!("checkpoint {} marked private", short_id(checkpoint_id));
+        }
         Command::Author { name, email } => {
             let mut author = store.read_author();
             let setting = name.is_some() || email.is_some();
@@ -797,6 +824,7 @@ impl Store {
         prompt: String,
         agent: String,
         workspace: &FsPath,
+        private: bool,
     ) -> Result<(CheckpointView, SaveView)> {
         let parent_save_id = self.read_head();
         let checkpoint_id = Uuid::now_v7();
@@ -854,6 +882,10 @@ impl Store {
 
         self.write_head(save_id)?;
 
+        if private {
+            self.mark_private(checkpoint_id).await?;
+        }
+
         Ok((
             CheckpointView {
                 id: checkpoint_id,
@@ -863,6 +895,7 @@ impl Store {
                 agent: Some(agent),
                 parent_save_id,
                 created_at: now,
+                private,
             },
             SaveView {
                 id: save_id,
@@ -972,38 +1005,55 @@ impl Store {
         Ok(result)
     }
 
-    async fn list_checkpoints(&self, all: bool) -> Result<Vec<CheckpointView>> {
+    async fn list_checkpoints(&self, all: bool, include_private: bool) -> Result<Vec<CheckpointView>> {
         if all {
-            let rows = sqlx::query(
-                "select id, title, prompt, response, agent, parent_save_id, created_at from checkpoints order by created_at desc",
-            )
-            .fetch_all(&self.pool)
-            .await?;
+            let sql = if include_private {
+                "select id, title, prompt, response, agent, parent_save_id, created_at, private from checkpoints order by created_at desc"
+            } else {
+                "select id, title, prompt, response, agent, parent_save_id, created_at, private from checkpoints where private = 0 order by created_at desc"
+            };
+            let rows = sqlx::query(sql)
+                .fetch_all(&self.pool)
+                .await?;
             return rows.into_iter().map(checkpoint_from_row).collect();
         }
 
         let ids = self.main_chain_checkpoint_ids().await?;
         if ids.is_empty() {
             // No HEAD yet — fall back to all by created_at
-            let rows = sqlx::query(
-                "select id, title, prompt, response, agent, parent_save_id, created_at from checkpoints order by created_at desc",
-            )
-            .fetch_all(&self.pool)
-            .await?;
+            let sql = if include_private {
+                "select id, title, prompt, response, agent, parent_save_id, created_at, private from checkpoints order by created_at desc"
+            } else {
+                "select id, title, prompt, response, agent, parent_save_id, created_at, private from checkpoints where private = 0 order by created_at desc"
+            };
+            let rows = sqlx::query(sql)
+                .fetch_all(&self.pool)
+                .await?;
             return rows.into_iter().map(checkpoint_from_row).collect();
         }
 
         let mut result = Vec::with_capacity(ids.len());
         for id in &ids {
             let row = sqlx::query(
-                "select id, title, prompt, response, agent, parent_save_id, created_at from checkpoints where id = ?1",
+                "select id, title, prompt, response, agent, parent_save_id, created_at, private from checkpoints where id = ?1",
             )
             .bind(id.to_string())
             .fetch_one(&self.pool)
             .await?;
-            result.push(checkpoint_from_row(row)?);
+            let cp = checkpoint_from_row(row)?;
+            if include_private || !cp.private {
+                result.push(cp);
+            }
         }
         Ok(result)
+    }
+
+    async fn mark_private(&self, checkpoint_id: Uuid) -> Result<()> {
+        sqlx::query("update checkpoints set private = 1 where id = ?1")
+            .bind(checkpoint_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     async fn set_title(&self, title: String) -> Result<Uuid> {
@@ -1161,7 +1211,8 @@ impl Store {
             select 'checkpoint' as kind, id, null as checkpoint_id, title,
                    prompt as detail, created_at
             from checkpoints
-            where title like ?1 or prompt like ?1 or response like ?1
+            where (title like ?1 or prompt like ?1 or response like ?1)
+              and private = 0
             order by created_at desc
             limit 20
             "#,
@@ -1520,6 +1571,17 @@ create table if not exists forks (
             .await?;
     }
 
+    let has_private: bool = sqlx::query_scalar(
+        "select count(*) > 0 from pragma_table_info('checkpoints') where name = 'private'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !has_private {
+        sqlx::query("alter table checkpoints add column private integer not null default 0")
+            .execute(pool)
+            .await?;
+    }
+
     // Populate save_files from existing manifest blobs for saves not yet migrated
     let unmigrated: Vec<(String, String)> = sqlx::query_as(
         "select id, manifest from saves
@@ -1694,6 +1756,20 @@ fn read_lupeshared(workspace: &FsPath) -> Vec<String> {
     }
 }
 
+#[allow(dead_code)]
+fn read_lupeprivate(workspace: &FsPath) -> Vec<String> {
+    let path = workspace.join(".lupeprivate");
+    match fs::read_to_string(&path) {
+        Ok(content) => content
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| l.to_string())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 fn write_default_lupeignore(workspace: &FsPath) -> Result<()> {
     let path = workspace.join(".lupeignore");
     if !path.exists() {
@@ -1795,6 +1871,7 @@ fn checkpoint_from_row(row: sqlx::sqlite::SqliteRow) -> Result<CheckpointView> {
         agent: row.try_get("agent")?,
         parent_save_id: optional_uuid(row.try_get("parent_save_id")?)?,
         created_at: parse_time(row.try_get::<String, _>("created_at")?)?,
+        private: row.try_get::<i64, _>("private").unwrap_or(0) != 0,
     })
 }
 
@@ -2105,6 +2182,23 @@ fn lupe_agent_section() -> &'static str {
 # Lupe Agent Workflow
 
 Lupe is prompt-driven source control for agents.
+
+## Privacy — MANDATORY
+
+**Before starting ANY task, check `.lupeprivate` if it exists, then check the
+user's prompt against it. If any keyword matches, or any file being touched
+matches a path pattern — run `lupe private` immediately. No exceptions.**
+
+Built-in triggers — ALWAYS mark private without needing `.lupeprivate`:
+- Prompt contains: secret, password, token, api key, credential, vulnerability,
+  exploit, CVE, auth, private key, certificate, .env
+- Task touches: .env, .env.*, secrets/, *secret*, *credential*, *private_key*
+- User says: "don't log this", "keep this private", "sensitive", "confidential"
+
+```bash
+lupe private                  # mark current checkpoint private
+lupe prompt --private "..."   # create private checkpoint from the start
+```
 
 ## Project Setup — Do This First
 

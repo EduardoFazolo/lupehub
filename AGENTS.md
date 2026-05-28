@@ -19,6 +19,41 @@ Use Lupe whenever you are acting as an agent in a workspace and may change files
 - `restore` restores a saved state (by UUID or fork name) into the workspace.
 - `search` searches remembered checkpoint/save text.
 
+## Privacy — MANDATORY
+
+**Before starting ANY task, check `.lupeprivate` if it exists, then check the
+user's prompt against it. If any keyword matches, or any file being touched
+matches a path pattern — run `lupe private` immediately. No exceptions.**
+
+Built-in triggers — ALWAYS mark private without needing `.lupeprivate`:
+- Prompt contains: `secret`, `password`, `token`, `api key`, `credential`,
+  `vulnerability`, `exploit`, `CVE`, `auth`, `private key`, `certificate`,
+  `.env`
+- Task touches: `.env`, `.env.*`, `secrets/`, `*secret*`, `*credential*`,
+  `*password*`, `*private_key*`
+- User says: "don't log this", "keep this private", "sensitive", "confidential"
+
+`.lupeprivate` lets the project define additional triggers:
+```
+# keywords (matched against prompt text)
+stripe_key
+internal_api
+
+# paths (matched against files being touched)
+config/secrets.yml
+src/auth/
+```
+
+Private checkpoints are:
+- Stored locally only — never synced to any server
+- Hidden from `lupe history`, `lupe graph`, `lupe search` by default
+- Shown as `[private]` in the graph (structure visible, content hidden)
+
+```bash
+lupe private                  # mark current checkpoint private
+lupe prompt --private "..."   # create private checkpoint from the start
+```
+
 ## Project Setup — Do This First
 
 At the start of any session in a new project, check for `.lupeignore`. If missing,

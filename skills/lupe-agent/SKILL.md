@@ -11,6 +11,24 @@ Lupe is source control for agents:
 - `fork` creates a named pointer to a save — a named branch point you can restore to by name.
 - Git/GitHub are not Lupe's backend.
 
+## Privacy — MANDATORY
+
+**Before starting ANY task, check `.lupeprivate` if it exists, then check the
+user's prompt against it. If any keyword matches, or any file being touched
+matches a path pattern — run `lupe private` immediately. No exceptions.**
+
+Built-in triggers — ALWAYS mark private without needing `.lupeprivate`:
+- Prompt contains: `secret`, `password`, `token`, `api key`, `credential`,
+  `vulnerability`, `exploit`, `CVE`, `auth`, `private key`, `certificate`, `.env`
+- Task touches: `.env`, `.env.*`, `secrets/`, `*secret*`, `*credential*`,
+  `*password*`, `*private_key*`
+- User says: "don't log this", "keep this private", "sensitive", "confidential"
+
+```bash
+lupe private                  # mark current checkpoint private
+lupe prompt --private "..."   # create private checkpoint from the start
+```
+
 ## Project Setup — Do This First
 
 At the start of any session in a new project, check for `.lupeignore`. If missing,
