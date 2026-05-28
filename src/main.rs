@@ -56,6 +56,8 @@ enum Command {
     History {
         #[arg(long)]
         all: bool,
+        #[arg(long)]
+        show_private: bool,
     },
     Saves {
         checkpoint: Option<Uuid>,
@@ -63,12 +65,16 @@ enum Command {
     Prompts {
         #[arg(long)]
         all: bool,
+        #[arg(long)]
+        show_private: bool,
     },
     Graph {
         #[arg(long)]
         no_color: bool,
         #[arg(long)]
         all: bool,
+        #[arg(long)]
+        show_private: bool,
     },
     Diff {
         from: Option<Uuid>,
@@ -328,8 +334,8 @@ async fn main() -> Result<()> {
                 &save.root_hash[..12]
             );
         }
-        Command::History { all } => {
-            for checkpoint in store.list_checkpoints(all, false).await? {
+        Command::History { all, show_private } => {
+            for checkpoint in store.list_checkpoints(all, show_private).await? {
                 println!(
                     "{} ({})  {}  {}",
                     short_id(checkpoint.id),
@@ -360,8 +366,8 @@ async fn main() -> Result<()> {
                 );
             }
         }
-        Command::Prompts { all } => {
-            for checkpoint in store.list_checkpoints(all, false).await? {
+        Command::Prompts { all, show_private } => {
+            for checkpoint in store.list_checkpoints(all, show_private).await? {
                 println!(
                     "{} ({})  {}  {}",
                     short_id(checkpoint.id),
@@ -379,7 +385,7 @@ async fn main() -> Result<()> {
                 println!();
             }
         }
-        Command::Graph { no_color, all } => {
+        Command::Graph { no_color, all, show_private } => {
             let colors = Colors::new(!no_color);
             let head_save = store.read_head();
             let main_chain_ids = store.main_chain_checkpoint_ids().await?;
@@ -387,14 +393,14 @@ async fn main() -> Result<()> {
                 main_chain_ids.iter().copied().collect();
 
             // All checkpoints needed to render the graph
-            let checkpoints = store.list_checkpoints(all, false).await?;
+            let checkpoints = store.list_checkpoints(all, show_private).await?;
             if checkpoints.is_empty() {
                 println!("no checkpoints yet");
                 return Ok(());
             }
 
             // Build map: save_id → dead-branch checkpoints forking from it
-            let all_checkpoints_for_forks = store.list_checkpoints(true, false).await?;
+            let all_checkpoints_for_forks = store.list_checkpoints(true, show_private).await?;
             let mut forks_from: std::collections::HashMap<Uuid, Vec<&CheckpointView>> =
                 std::collections::HashMap::new();
             // We need to own the vec for lifetime reasons — collect all non-main checkpoints
@@ -417,37 +423,50 @@ async fn main() -> Result<()> {
                 let is_head_checkpoint =
                     head_save.is_some() && Some(checkpoint.id) == head_checkpoint_id;
                 let head_marker = if is_head_checkpoint { " [HEAD]" } else { "" };
-                let title_display = if checkpoint.private {
-                    colors.dim("[private]")
-                } else {
-                    colors.bold(&checkpoint.title)
-                };
-                let checkpoint_sym = if checkpoint.private {
-                    colors.dim("◆")
-                } else {
-                    colors.checkpoint("◆")
-                };
+                let (cp_label, title_display, pipe, prompt_label, checkpoint_sym) =
+                    if checkpoint.private {
+                        let title = if show_private {
+                            colors.private_cp(&checkpoint.title)
+                        } else {
+                            colors.private_cp("[private]")
+                        };
+                        (
+                            colors.private_cp(&format!("checkpoint {}", short_id(checkpoint.id))),
+                            title,
+                            colors.private_cp("│"),
+                            colors.private_cp("prompt:"),
+                            colors.private_cp("◆"),
+                        )
+                    } else {
+                        (
+                            colors.checkpoint(&format!("checkpoint {}", short_id(checkpoint.id))),
+                            colors.bold(&checkpoint.title),
+                            colors.dim("│"),
+                            colors.dim("prompt:"),
+                            colors.checkpoint("◆"),
+                        )
+                    };
                 println!(
                     "{} {} {} {} {}{}",
                     checkpoint_sym,
-                    colors.checkpoint(&format!("checkpoint {}", short_id(checkpoint.id))),
+                    cp_label,
                     colors.dim(&format!("({})", checkpoint.id)),
                     colors.dim(&friendly_time(checkpoint.created_at)),
                     title_display,
                     head_marker,
                 );
-                let prompt_display = if checkpoint.private {
+                let prompt_display = if checkpoint.private && !show_private {
                     "[private]".to_string()
                 } else {
                     one_line(checkpoint.prompt.as_deref().unwrap_or(""))
                 };
                 println!(
                     "{} {} {}",
-                    colors.dim("│"),
-                    colors.dim("prompt:"),
+                    pipe,
+                    prompt_label,
                     prompt_display
                 );
-                if !checkpoint.private {
+                if !checkpoint.private || show_private {
                     if let Some(agent) = &checkpoint.agent {
                         println!("{} {} {}", colors.dim("│"), colors.dim("agent:"), agent);
                     }
@@ -732,9 +751,8 @@ async fn main() -> Result<()> {
             }
         },
         Command::Private => {
-            let checkpoint_id = store.latest_checkpoint_id().await?;
-            store.mark_private(checkpoint_id).await?;
-            println!("checkpoint {} marked private", short_id(checkpoint_id));
+            store.set_next_private()?;
+            println!("next checkpoint will be private");
         }
         Command::Author { name, email } => {
             let mut author = store.read_author();
@@ -826,6 +844,7 @@ impl Store {
         workspace: &FsPath,
         private: bool,
     ) -> Result<(CheckpointView, SaveView)> {
+        let private = private || self.consume_next_private();
         let parent_save_id = self.read_head();
         let checkpoint_id = Uuid::now_v7();
         let save_id = Uuid::now_v7();
@@ -1046,6 +1065,25 @@ impl Store {
             }
         }
         Ok(result)
+    }
+
+    fn next_private_path(&self) -> PathBuf {
+        self.home.join("next_private")
+    }
+
+    fn set_next_private(&self) -> Result<()> {
+        fs::write(self.next_private_path(), "")?;
+        Ok(())
+    }
+
+    fn consume_next_private(&self) -> bool {
+        let path = self.next_private_path();
+        if path.exists() {
+            let _ = fs::remove_file(&path);
+            true
+        } else {
+            false
+        }
     }
 
     async fn mark_private(&self, checkpoint_id: Uuid) -> Result<()> {
@@ -1968,6 +2006,10 @@ impl Colors {
         self.paint("2;33", value)
     }
 
+    fn private_cp(&self, value: &str) -> String {
+        self.paint("36", value)
+    }
+
     fn added(&self, value: &str) -> String {
         self.paint("32", value)
     }
@@ -2357,6 +2399,17 @@ fn git_push(workspace: &FsPath, message: &str) -> Result<()> {
     Ok(())
 }
 
+const SENSITIVE_KEYWORDS: &[&str] = &[
+    "secret", "password", "token", "api key", "api_key", "credential",
+    "vulnerability", "exploit", "cve", "private key", "private_key",
+    "certificate", ".env", "auth",
+];
+
+fn title_contains_sensitive(title: &str) -> bool {
+    let lower = title.to_lowercase();
+    SENSITIVE_KEYWORDS.iter().any(|k| lower.contains(k))
+}
+
 fn title_from_response(response: &str) -> Option<String> {
     for line in response.lines() {
         let line = line.trim();
@@ -2376,6 +2429,9 @@ fn title_from_response(response: &str) -> Option<String> {
             .replace('`', "");
         let clean = clean.trim().to_string();
         if clean.len() < 10 {
+            continue;
+        }
+        if title_contains_sensitive(&clean) {
             continue;
         }
         const MAX: usize = 80;

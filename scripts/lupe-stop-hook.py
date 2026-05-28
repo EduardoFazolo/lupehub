@@ -96,6 +96,36 @@ def detect_agent(payload: dict, model: str | None) -> str:
     return f"{agent_name}/{agent_model}"
 
 
+SENSITIVE_KEYWORDS = [
+    "secret", "password", "token", "api key", "api_key", "credential",
+    "vulnerability", "exploit", "cve", "private key", "private_key",
+    "certificate", ".env", "don't log", "keep this private", "sensitive",
+    "confidential",
+]
+
+
+
+def is_sensitive(text: str) -> bool:
+    if not text:
+        return False
+    lower = text.lower()
+    return any(k in lower for k in SENSITIVE_KEYWORDS)
+
+
+def read_lupeprivate(workspace: str) -> list[str]:
+    path = os.path.join(workspace, ".lupeprivate")
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path) as f:
+            return [
+                l.strip() for l in f
+                if l.strip() and not l.strip().startswith("#")
+            ]
+    except Exception:
+        return []
+
+
 def main() -> None:
     try:
         payload = json.load(sys.stdin)
@@ -117,12 +147,35 @@ def main() -> None:
 
     agent = detect_agent(payload, model)
 
+    # Check if this turn should be private
+    workspace = os.getcwd()
+    extra_keywords = read_lupeprivate(workspace)
+    all_keywords = SENSITIVE_KEYWORDS + extra_keywords
+
+    def is_sensitive_custom(text: str) -> bool:
+        if not text:
+            return False
+        lower = text.lower()
+        return any(k.lower() in lower for k in all_keywords)
+
+    private = is_sensitive_custom(user_text or "") or is_sensitive_custom(assistant_text or "")
+
     # Create checkpoint for this turn (user prompt → workspace snapshot)
     if user_text and user_text.strip():
-        run_lupe("prompt", user_text.strip(), "--agent", agent)
+        args = ["prompt", user_text.strip(), "--agent", agent]
+        if private:
+            args.append("--private")
+        run_lupe(*args)
+    elif private:
+        # No user text but response is sensitive — mark latest checkpoint private
+        run_lupe("private")
 
     # Attach agent response to that checkpoint
     run_lupe("respond", assistant_text.strip())
+
+    # If private flag wasn't set at prompt creation, mark now in case response triggered it
+    if private:
+        run_lupe("private")
 
     sys.exit(0)
 
