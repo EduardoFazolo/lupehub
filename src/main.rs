@@ -108,6 +108,7 @@ enum Command {
         lupe_bin: Option<PathBuf>,
     },
     Status,
+    Init,
     Workspace {
         #[command(subcommand)]
         action: WorkspaceAction,
@@ -627,7 +628,9 @@ async fn main() -> Result<()> {
             let path = install_agent_instructions(&workspace)?;
             println!("installed agent instructions {}", path.display());
         }
-        Command::Status => {
+        Command::Status | Command::Init => {
+            let workspace = absolutize(PathBuf::from("."))?;
+            write_default_lupeignore(&workspace)?;
             println!("lupe ok");
             println!("mode {}", store.home_source);
             println!("home {}", store.home.display());
@@ -1549,7 +1552,25 @@ fn restore_manifest(manifest: &Manifest, object_dir: &FsPath, workspace: &FsPath
     Ok(())
 }
 
-const DEFAULT_IGNORE: &[&str] = &[".git", ".lupe", "target", "node_modules"];
+const DEFAULT_IGNORE: &[&str] = &[
+    ".git",
+    ".lupe",
+    "target",
+    "node_modules",
+    ".next",
+    "dist",
+    "build",
+    "out",
+    ".cache",
+    ".turbo",
+    ".vercel",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "coverage",
+    "*.map",
+    "*.pyc",
+];
 
 fn read_lupeignore(workspace: &FsPath) -> Vec<String> {
     let path = workspace.join(".lupeignore");
@@ -1586,10 +1607,52 @@ fn write_default_lupeignore(workspace: &FsPath) -> Result<()> {
              .git\n\
              .lupe\n\
              target\n\
-             node_modules\n",
+             node_modules\n\
+             .next\n\
+             dist\n\
+             build\n\
+             out\n\
+             .cache\n\
+             .turbo\n\
+             .vercel\n\
+             __pycache__\n\
+             .venv\n\
+             venv\n\
+             coverage\n\
+             *.map\n\
+             *.pyc\n",
         )?;
+        ensure_gitignore(workspace);
     }
     Ok(())
+}
+
+fn ensure_gitignore(workspace: &FsPath) {
+    // Only act if this workspace is inside a git repo
+    if !workspace.join(".git").is_dir() {
+        return;
+    }
+    let gitignore_path = workspace.join(".gitignore");
+    let existing = fs::read_to_string(&gitignore_path).unwrap_or_default();
+    let entries = [".lupe/"];
+    let to_add: Vec<&str> = entries
+        .iter()
+        .filter(|e| !existing.lines().any(|l| l.trim() == **e))
+        .copied()
+        .collect();
+    if to_add.is_empty() {
+        return;
+    }
+    let mut content = existing;
+    if !content.ends_with('\n') && !content.is_empty() {
+        content.push('\n');
+    }
+    content.push_str("\n# Lupe\n");
+    for entry in &to_add {
+        content.push_str(entry);
+        content.push('\n');
+    }
+    let _ = fs::write(&gitignore_path, content);
 }
 
 fn should_skip(workspace: &FsPath, path: &FsPath, ignore: &[String]) -> bool {
@@ -1653,7 +1716,12 @@ fn save_from_row(row: sqlx::sqlite::SqliteRow) -> Result<SaveView> {
 
 fn discover_or_start_project_home() -> Result<(PathBuf, String)> {
     let cwd = std::env::current_dir()?;
+    let home = std::env::var("HOME").ok().map(PathBuf::from);
     for ancestor in cwd.ancestors() {
+        // Don't treat ~/.lupe as a project home — it's the global fallback
+        if home.as_deref() == Some(ancestor) {
+            break;
+        }
         let candidate = ancestor.join(".lupe");
         if candidate.is_dir() {
             return Ok((candidate, "project".to_string()));
