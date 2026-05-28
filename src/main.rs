@@ -73,7 +73,7 @@ enum Command {
         to: Option<Uuid>,
     },
     Restore {
-        save: Uuid,
+        save: String,
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
     },
@@ -109,6 +109,10 @@ enum Command {
     },
     Status,
     Init,
+    Fork {
+        name: String,
+    },
+    Forks,
     Workspace {
         #[command(subcommand)]
         action: WorkspaceAction,
@@ -124,7 +128,7 @@ enum Command {
 #[derive(Subcommand)]
 enum WorkspaceAction {
     New {
-        name: String,
+        fork: String,
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
     },
@@ -137,7 +141,7 @@ enum WorkspaceAction {
 struct WorkspaceInfo {
     name: String,
     path: PathBuf,
-    head: Option<Uuid>,
+    fork: String,
 }
 
 struct Store {
@@ -197,6 +201,13 @@ struct SearchResult {
     checkpoint_id: Option<Uuid>,
     title: String,
     detail: Option<String>,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ForkView {
+    name: String,
+    save_id: Uuid,
     created_at: DateTime<Utc>,
 }
 
@@ -549,7 +560,11 @@ async fn main() -> Result<()> {
         }
         Command::Restore { save, workspace } => {
             let workspace = absolutize(workspace)?;
-            let save = store.restore_save(save, &workspace).await?;
+            let save_id = match Uuid::parse_str(&save) {
+                Ok(id) => id,
+                Err(_) => store.resolve_fork_name(&save).await?,
+            };
+            let save = store.restore_save(save_id, &workspace).await?;
             println!(
                 "restored save {} ({}) seq={} files={}",
                 short_id(save.id),
@@ -644,25 +659,40 @@ async fn main() -> Result<()> {
                 (None, None) => println!("author not configured"),
             }
         }
+        Command::Fork { name } => {
+            let fork = store.create_fork(name).await?;
+            println!("fork {} -> save {}", fork.name, short_id(fork.save_id));
+        }
+        Command::Forks => {
+            let forks = store.list_forks().await?;
+            if forks.is_empty() {
+                println!("no forks — run: lupe fork <name>");
+            } else {
+                for fork in forks {
+                    println!(
+                        "{}  save={}  {}",
+                        fork.name,
+                        short_id(fork.save_id),
+                        friendly_time(fork.created_at),
+                    );
+                }
+            }
+        }
         Command::Workspace { action } => match action {
-            WorkspaceAction::New { name, workspace } => {
+            WorkspaceAction::New { fork, workspace } => {
                 let workspace = absolutize(workspace)?;
-                let ws_dir = store.create_workspace(&name, &workspace).await?;
-                println!("workspace '{name}' created");
-                println!("path {}", ws_dir.display());
-                println!("cd into it to work or test independently");
+                let ws_dir = store.create_workspace(&fork, &workspace).await?;
+                println!("workspace '{fork}' created");
+                println!("path  {}", ws_dir.display());
+                println!("cd into it and run your app independently");
             }
             WorkspaceAction::List => {
                 let workspaces = store.list_workspaces()?;
                 if workspaces.is_empty() {
-                    println!("no workspaces — run: lupe workspace new <name>");
+                    println!("no workspaces — run: lupe workspace new <fork-name>");
                 } else {
                     for ws in workspaces {
-                        let head = ws
-                            .head
-                            .map(|h| short_id(h))
-                            .unwrap_or_else(|| "?".to_string());
-                        println!("{} head={} {}", ws.name, head, ws.path.display());
+                        println!("{}  fork={}  {}", ws.name, ws.fork, ws.path.display());
                     }
                 }
             }
@@ -1162,25 +1192,61 @@ impl Store {
             .and_then(parse_uuid)
     }
 
-    fn workspaces_root(&self) -> PathBuf {
-        self.home.join("workspaces")
+    async fn create_fork(&self, name: String) -> Result<ForkView> {
+        let save_id = self.read_head()
+            .ok_or_else(|| anyhow!("no HEAD — run lupe prompt first"))?;
+        let now = Utc::now();
+        sqlx::query(
+            "insert or replace into forks (name, save_id, created_at) values (?1, ?2, ?3)",
+        )
+        .bind(&name)
+        .bind(save_id.to_string())
+        .bind(now.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(ForkView { name, save_id, created_at: now })
     }
 
-    async fn create_workspace(&self, name: &str, source_workspace: &FsPath) -> Result<PathBuf> {
-        let ws_dir = self.workspaces_root().join(name);
+    async fn list_forks(&self) -> Result<Vec<ForkView>> {
+        let rows = sqlx::query(
+            "select name, save_id, created_at from forks order by created_at desc",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(ForkView {
+                name: row.try_get("name")?,
+                save_id: parse_uuid(row.try_get::<String, _>("save_id")?)?,
+                created_at: parse_time(row.try_get::<String, _>("created_at")?)?,
+            });
+        }
+        Ok(result)
+    }
+
+    async fn resolve_fork_name(&self, name: &str) -> Result<Uuid> {
+        let save_id: Option<String> = sqlx::query_scalar(
+            "select save_id from forks where name = ?1",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        save_id
+            .ok_or_else(|| anyhow!("no fork named '{name}'"))
+            .and_then(parse_uuid)
+    }
+
+    async fn create_workspace(&self, fork_name: &str, source_workspace: &FsPath) -> Result<PathBuf> {
+        let save_id = self.resolve_fork_name(fork_name).await?;
+        let ws_dir = self.home.join("workspaces").join(fork_name);
         if ws_dir.exists() {
-            bail!("workspace '{name}' already exists at {}", ws_dir.display());
+            bail!("workspace '{fork_name}' already exists — drop it first with: lupe workspace drop {fork_name}");
         }
 
         let shared = read_lupeshared(source_workspace);
-        let head = self
-            .read_head()
-            .ok_or_else(|| anyhow!("no HEAD — run lupe prompt first"))?;
-        let manifest = self.get_manifest(head).await?;
-
+        let manifest = self.get_manifest(save_id).await?;
         fs::create_dir_all(&ws_dir)?;
 
-        // Copy tracked files from object store
         for file in &manifest.files {
             let dest = ws_dir.join(&file.path);
             if let Some(parent) = dest.parent() {
@@ -1190,7 +1256,6 @@ impl Store {
             fs::copy(src, &dest)?;
         }
 
-        // Symlink .lupeshared entries from source workspace
         for shared_path in &shared {
             let target = source_workspace.join(shared_path);
             let link = ws_dir.join(shared_path);
@@ -1203,7 +1268,6 @@ impl Store {
             }
         }
 
-        // Symlink config files so workspace inherits ignore rules
         for config in &[".lupeignore", ".lupeshared"] {
             let target = source_workspace.join(config);
             let link = ws_dir.join(config);
@@ -1213,12 +1277,13 @@ impl Store {
             }
         }
 
-        fs::write(ws_dir.join(".lupe-head"), head.to_string())?;
+        fs::write(ws_dir.join(".lupe-head"), save_id.to_string())?;
+        fs::write(ws_dir.join(".lupe-fork"), fork_name)?;
         Ok(ws_dir)
     }
 
     fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
-        let root = self.workspaces_root();
+        let root = self.home.join("workspaces");
         if !root.exists() {
             return Ok(Vec::new());
         }
@@ -1228,10 +1293,9 @@ impl Store {
             if entry.file_type()?.is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 let path = entry.path();
-                let head = fs::read_to_string(path.join(".lupe-head"))
-                    .ok()
-                    .and_then(|s| Uuid::parse_str(s.trim()).ok());
-                workspaces.push(WorkspaceInfo { name, path, head });
+                let fork = fs::read_to_string(path.join(".lupe-fork"))
+                    .unwrap_or_else(|_| name.clone());
+                workspaces.push(WorkspaceInfo { name, path, fork });
             }
         }
         workspaces.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1239,7 +1303,7 @@ impl Store {
     }
 
     fn drop_workspace(&self, name: &str) -> Result<()> {
-        let ws_dir = self.workspaces_root().join(name);
+        let ws_dir = self.home.join("workspaces").join(name);
         if !ws_dir.exists() {
             bail!("workspace '{name}' not found");
         }
@@ -1384,6 +1448,13 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         )
         "#,
         "create index if not exists save_files_path_idx on save_files (path, save_id)",
+        r#"
+create table if not exists forks (
+    name text primary key,
+    save_id text not null references saves(id),
+    created_at text not null
+)
+"#,
     ];
 
     for statement in statements {
@@ -2012,8 +2083,8 @@ Lupe is prompt-driven source control for agents.
 
 ## Project Setup — Do This First
 
-At the start of any session in a new project, check for `.lupeignore` and
-`.lupeshared`. If either is missing, detect the stack and create them.
+At the start of any session in a new project, check for `.lupeignore`. If missing,
+detect the stack and create it.
 
 Detect stack: `package.json` → Node, `Cargo.toml` → Rust, `requirements.txt`/
 `pyproject.toml` → Python, `go.mod` → Go, `pom.xml`/`build.gradle` → Java.
@@ -2022,26 +2093,24 @@ Detect stack: `package.json` → Node, `Cargo.toml` → Rust, `requirements.txt`
 with generic defaults, but create it early with stack-specific entries
 (e.g. `dist`, `.next`, `__pycache__`, `build`).
 
-`.lupeshared` — what gets symlinked instead of copied into `lupe workspace` forks.
-List expensive-to-reinstall dirs: `node_modules`, `target`, `.venv`.
-Only include entries that actually exist in the project.
+## Forks — Named Branch Points
 
-## When to Create a Workspace
+Use forks to name stable states you might want to return to.
 
-Create a workspace proactively — without waiting for the user to ask — when:
+```bash
+lupe fork "before-big-refactor"   # tag current HEAD save with a name
+lupe forks                        # list all named forks
+lupe restore before-big-refactor  # restore by name
+```
 
-- User wants to try two different approaches to the same problem
-- User says "test this in isolation", "try this separately", "don't break what's working"
-- You are about to make large, risky, or experimental changes to files the user is actively using
-- User asks you to implement a feature while another agent is working on the same codebase
-- You are exploring an approach you are not confident about
+Create a fork proactively before any risky or experimental change, before trying
+two different approaches, or when the user says "don't break what's working".
 
-Workflow:
-1. `lupe save "stable state before experiment"` — snapshot current state
-2. `lupe workspace new "<descriptive-name>"` — create isolated workspace
-3. Tell the user the path so they can open it / run the app there
-4. Do the experimental work inside the workspace
-5. If it works: user promotes it. If not: `lupe workspace drop <name>`, no damage done.
+Trying an alternative approach:
+1. `lupe fork "stable"` — name the current stable state
+2. Make the experimental change
+3. `lupe save "experiment done"`
+4. If it works: keep going. If not: `lupe restore stable` → dead branch in graph.
 
 ## Workflow
 
@@ -2066,26 +2135,21 @@ This preserves dropped work as a dead branch visible in `lupe graph`.
 Useful commands:
 
 ```bash
-lupe install
 lupe history
 lupe prompts
 lupe saves
+lupe forks
 lupe graph
 lupe search "<topic>"
 lupe diff
 lupe diff <save-uuid>
 lupe diff <from-uuid> <to-uuid>
-lupe restore <save-uuid>
-lupe install-agent
-lupe install-hooks
-lupe workspace new <name>
-lupe workspace list
-lupe workspace drop <name>
+lupe restore <save-uuid-or-fork-name>
+lupe fork "name"
 lupe author
 lupe author --name "Name" --email "email"
 ```
 
-`lupe install` configures the current workspace and wires agent stop hooks.
 Lupe does not automatically see prompts unless the agent or host calls Lupe.
 This file is the contract that tells agents when to call it.
 <!-- /lupe-agent-workflow -->
