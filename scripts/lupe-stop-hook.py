@@ -132,6 +132,10 @@ def main() -> None:
     except Exception:
         sys.exit(0)
 
+    # Only run in projects that have opted in to lupe
+    if not os.path.isdir(os.path.join(os.getcwd(), ".lupe")):
+        sys.exit(0)
+
     transcript_path = payload.get("transcript_path") or ""
 
     # Codex provides assistant message directly

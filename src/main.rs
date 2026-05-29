@@ -128,6 +128,17 @@ enum Command {
         #[command(subcommand)]
         action: WorkspaceAction,
     },
+    Cat {
+        file: String,
+        checkpoint: Uuid,
+        #[arg(long)]
+        from_save: Option<Uuid>,
+    },
+    Files {
+        checkpoint: Uuid,
+        #[arg(long)]
+        from_save: Option<Uuid>,
+    },
     Private,
     Author {
         #[arg(long)]
@@ -750,6 +761,29 @@ async fn main() -> Result<()> {
                 println!("workspace '{name}' dropped");
             }
         },
+        Command::Cat { file, checkpoint, from_save } => {
+            let save_id = match from_save {
+                Some(id) => id,
+                None => store.latest_save_for_checkpoint(checkpoint).await?,
+            };
+            let manifest = store.get_manifest(save_id).await?;
+            let entry = manifest.files.iter().find(|f| f.path == file)
+                .ok_or_else(|| anyhow!("file '{}' not found in save {}", file, short_id(save_id)))?;
+            let obj = object_path(&store.object_dir, &entry.hash)?;
+            let content = fs::read_to_string(&obj)
+                .with_context(|| format!("failed to read object {}", entry.hash))?;
+            print!("{content}");
+        }
+        Command::Files { checkpoint, from_save } => {
+            let save_id = match from_save {
+                Some(id) => id,
+                None => store.latest_save_for_checkpoint(checkpoint).await?,
+            };
+            let manifest = store.get_manifest(save_id).await?;
+            for f in &manifest.files {
+                println!("{}", f.path);
+            }
+        }
         Command::Private => {
             store.set_next_private()?;
             println!("next checkpoint will be private");
@@ -1124,6 +1158,17 @@ impl Store {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    async fn latest_save_for_checkpoint(&self, checkpoint_id: Uuid) -> Result<Uuid> {
+        let id: Option<String> = sqlx::query_scalar(
+            "select id from saves where checkpoint_id = ?1 order by sequence desc limit 1",
+        )
+        .bind(checkpoint_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        id.ok_or_else(|| anyhow!("no saves found for checkpoint {}", short_id(checkpoint_id)))
+            .and_then(parse_uuid)
     }
 
     async fn list_saves(&self, checkpoint: Option<Uuid>) -> Result<Vec<SaveView>> {
@@ -1809,6 +1854,7 @@ fn read_lupeprivate(workspace: &FsPath) -> Vec<String> {
 }
 
 fn write_default_lupeignore(workspace: &FsPath) -> Result<()> {
+    ensure_gitignore(workspace);
     let path = workspace.join(".lupeignore");
     if !path.exists() {
         fs::write(
