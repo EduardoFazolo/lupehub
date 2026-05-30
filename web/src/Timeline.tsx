@@ -56,16 +56,11 @@ export function Timeline({ checkpoints, selectedId, onSelect }: Props) {
     headRef.current?.scrollIntoView({ block: 'center', behavior: 'instant' });
   }, []);
 
-  const saveToCheckpoint = new Map<string, string>();
-  for (const cp of checkpoints) {
-    for (const s of cp.saves) saveToCheckpoint.set(s.id, cp.id);
-  }
-
   const mainChain = checkpoints.filter(c => c.is_main_chain);
   const deadByParentCp = new Map<string, CheckpointData[]>();
   for (const cp of checkpoints) {
     if (cp.is_main_chain) continue;
-    const parentCpId = cp.parent_save_id ? saveToCheckpoint.get(cp.parent_save_id) : null;
+    const parentCpId = cp.parent_checkpoint_id;
     if (parentCpId) {
       const arr = deadByParentCp.get(parentCpId) ?? [];
       arr.push(cp);
@@ -156,75 +151,23 @@ export function Timeline({ checkpoints, selectedId, onSelect }: Props) {
                   <div style={{
                     fontSize: 10, color: C.textSub,
                     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    marginBottom: 4,
                   }}>
                     {oneLinePrompt(cp.prompt)}
                   </div>
                 )}
+
+                {/* Diff stats inline — only show when there are actual changes */}
+                {(cp.diff_added + cp.diff_modified + cp.diff_removed) > 0 && (
+                  <div style={{ display: 'flex', gap: 6, fontSize: 10 }}>
+                    {cp.diff_added    > 0 && <span style={{ color: '#1a7f37', fontWeight: 600 }}>+{cp.diff_added}</span>}
+                    {cp.diff_modified > 0 && <span style={{ color: '#8a6500', fontWeight: 600 }}>~{cp.diff_modified}</span>}
+                    {cp.diff_removed  > 0 && <span style={{ color: '#cf222e', fontWeight: 600 }}>−{cp.diff_removed}</span>}
+                    <span style={{ color: C.textMuted }}>files</span>
+                  </div>
+                )}
               </div>
             </div>
-
-            {/* ── Save rows — nested inside checkpoint ── */}
-            {cp.saves.map((s, si) => {
-              const isLastSave = si === cp.saves.length - 1;
-              const hasMore = !isLastSave || hasDead || !isLast;
-              const changed = s.diff_added + s.diff_modified + s.diff_removed;
-              const unchanged = changed === 0;
-
-              return (
-                <div key={s.id}
-                  onClick={() => onSelect(cp.id)}
-                  style={{ display: 'flex', alignItems: 'stretch', cursor: 'pointer' }}
-                  onMouseEnter={e => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = C.rowHover; }}
-                  onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
-                >
-                  {/* Tree gutter: vertical line + L-connector to save dot */}
-                  <div style={{ width: TREE_W, minWidth: TREE_W, flexShrink: 0, position: 'relative' }}>
-                    {/* Vertical main line continues */}
-                    {hasMore && (
-                      <div style={{ position: 'absolute', left: '50%', top: 0, bottom: 0, width: 2, background: C.line, transform: 'translateX(-50%)' }} />
-                    )}
-                    {/* L-connector: short horizontal to save dot */}
-                    <div style={{ position: 'absolute', left: '50%', top: 10, width: 8, height: 2, background: C.line }} />
-                    {/* Save dot */}
-                    <div style={{
-                      position: 'absolute', left: '50%', top: 6,
-                      marginLeft: 8,
-                      width: 6, height: 6,
-                      background: unchanged ? '#ddd8f0' : C.dot,
-                      borderRadius: '50%',
-                    }} />
-                  </div>
-
-                  {/* Save content */}
-                  <div style={{
-                    flex: 1, minWidth: 0,
-                    padding: '4px 12px 4px 16px',
-                    display: 'flex', alignItems: 'center', gap: 6,
-                  }}>
-                    <span style={{ fontSize: 10, color: C.textSub, fontWeight: 500 }}>
-                      {s.sequence === 0 ? 'snapshot' : `save ${s.sequence}`}
-                    </span>
-                    {s.message && s.sequence > 0 && (
-                      <span style={{ fontSize: 10, color: C.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-                        {s.message}
-                      </span>
-                    )}
-                    {/* Diff stats */}
-                    <span style={{ marginLeft: 'auto', display: 'flex', gap: 5, fontSize: 10, flexShrink: 0 }}>
-                      {unchanged ? (
-                        <span style={{ color: C.textMuted, fontStyle: 'italic' }}>no changes</span>
-                      ) : (
-                        <>
-                          {s.diff_added > 0    && <span style={{ color: '#1a7f37', fontWeight: 600 }}>+{s.diff_added}</span>}
-                          {s.diff_modified > 0 && <span style={{ color: '#8a6500', fontWeight: 600 }}>~{s.diff_modified}</span>}
-                          {s.diff_removed > 0  && <span style={{ color: '#cf222e', fontWeight: 600 }}>−{s.diff_removed}</span>}
-                        </>
-                      )}
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
 
             {/* ── Dead branches ── */}
             {dead.map((d, di) => {

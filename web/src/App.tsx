@@ -6,52 +6,45 @@ import { Detail } from './Detail';
 // Mock for dev fallback
 const MOCK: GraphData = {
   project_name: 'demo',
-  head_save_id: null,
+  head_checkpoint_id: 'cp-3',
   checkpoints: [
     {
       id: 'cp-1', title: 'Initial setup',
       prompt: 'Create a new Rust project with SQLite storage for checkpoints',
       response: null, agent: 'claude-opus-4', session_id: null,
-      parent_save_id: null, created_at: new Date(Date.now() - 3600000 * 6).toISOString(),
+      parent_checkpoint_id: null, root_hash: 'abc123', file_count: 4,
+      created_at: new Date(Date.now() - 3600000 * 6).toISOString(),
       private: false, is_head: false, is_main_chain: true,
-      saves: [
-        { id: 's-1a', sequence: 0, message: 'initial state', file_count: 4, root_hash: 'abc123', diff_added: 0, diff_modified: 0, diff_removed: 0, created_at: new Date(Date.now() - 3600000 * 6).toISOString() },
-        { id: 's-1b', sequence: 1, message: 'add Cargo.toml deps', file_count: 5, root_hash: 'def456', diff_added: 0, diff_modified: 0, diff_removed: 0, created_at: new Date(Date.now() - 3600000 * 5).toISOString() },
-      ],
+      diff_added: 4, diff_modified: 0, diff_removed: 0,
     },
     {
       id: 'cp-2', title: 'Add checkpoint command',
       prompt: 'Implement lupe checkpoint with SQLite storage and UUID v7',
       response: 'Added checkpoint command with SQLite backend. Uses UUID v7 for time-ordered IDs.',
       agent: 'claude-opus-4', session_id: null,
-      parent_save_id: 's-1b', created_at: new Date(Date.now() - 3600000 * 4).toISOString(),
+      parent_checkpoint_id: 'cp-1', root_hash: 'ghi789', file_count: 6,
+      created_at: new Date(Date.now() - 3600000 * 4).toISOString(),
       private: false, is_head: false, is_main_chain: true,
-      saves: [
-        { id: 's-2a', sequence: 0, message: 'initial state', file_count: 6, root_hash: 'ghi789', diff_added: 0, diff_modified: 0, diff_removed: 0, created_at: new Date(Date.now() - 3600000 * 4).toISOString() },
-        { id: 's-2b', sequence: 1, message: 'add checkpoint table', file_count: 7, root_hash: 'jkl012', diff_added: 0, diff_modified: 0, diff_removed: 0, created_at: new Date(Date.now() - 3600000 * 3.5).toISOString() },
-      ],
+      diff_added: 1, diff_modified: 2, diff_removed: 0,
     },
     {
       id: 'cp-dead', title: 'Try postgres instead',
       prompt: 'Switch to postgres backend for scalability',
       response: null, agent: 'claude-sonnet-4', session_id: null,
-      parent_save_id: 's-1b', created_at: new Date(Date.now() - 3600000 * 4.5).toISOString(),
+      parent_checkpoint_id: 'cp-1', root_hash: 'xyz999', file_count: 5,
+      created_at: new Date(Date.now() - 3600000 * 4.5).toISOString(),
       private: false, is_head: false, is_main_chain: false,
-      saves: [
-        { id: 's-d1', sequence: 0, message: 'initial state', file_count: 5, root_hash: 'xyz999', diff_added: 0, diff_modified: 0, diff_removed: 0, created_at: new Date(Date.now() - 3600000 * 4.5).toISOString() },
-      ],
+      diff_added: 1, diff_modified: 1, diff_removed: 0,
     },
     {
       id: 'cp-3', title: 'Add web graph command',
-      prompt: 'Add lupe graph --web that opens a beautiful React Flow graph in the browser',
-      response: 'Implemented graph --web with axum server, React Flow frontend, checkpoint nodes with saves embedded.',
+      prompt: 'Add lupe graph --web that opens a beautiful graph in the browser',
+      response: 'Implemented graph --web with axum server and React frontend.',
       agent: 'claude-opus-4', session_id: null,
-      parent_save_id: 's-2b', created_at: new Date(Date.now() - 3600000 * 2).toISOString(),
+      parent_checkpoint_id: 'cp-2', root_hash: 'mno345', file_count: 8,
+      created_at: new Date(Date.now() - 3600000 * 2).toISOString(),
       private: false, is_head: true, is_main_chain: true,
-      saves: [
-        { id: 's-3a', sequence: 0, message: 'initial state', file_count: 8, root_hash: 'mno345', diff_added: 0, diff_modified: 0, diff_removed: 0, created_at: new Date(Date.now() - 3600000 * 2).toISOString() },
-        { id: 's-3b', sequence: 1, message: 'graph renders tree', file_count: 8, root_hash: 'pqr678', diff_added: 0, diff_modified: 0, diff_removed: 0, created_at: new Date(Date.now() - 3600000 * 1).toISOString() },
-      ],
+      diff_added: 3, diff_modified: 1, diff_removed: 0,
     },
   ],
 };
