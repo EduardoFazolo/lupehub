@@ -1,0 +1,19 @@
+[package]
+name = "lupe-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "lupe"
+path = "src/main.rs"
+
+[dependencies]
+lupe-core = { path = "../lupe-core" }
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+open = "5"
+which = "6"

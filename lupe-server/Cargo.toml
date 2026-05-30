@@ -1,0 +1,23 @@
+[package]
+name = "lupe-server"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "lupe-server"
+path = "src/main.rs"
+
+[dependencies]
+lupe-core = { path = "../lupe-core" }
+anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+futures = "0.3"
+mime_guess = "2"
+rust-embed = "8"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tower-http = { version = "0.6", features = ["cors"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+clap = { version = "4", features = ["derive", "env"] }

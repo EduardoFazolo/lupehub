@@ -56,7 +56,7 @@ export default function App() {
   useEffect(() => {
     let initial = true;
 
-    function poll() {
+    function fetchGraph() {
       fetch('/api/graph')
         .then(r => { if (!r.ok) throw new Error(); return r.json(); })
         .then((d: GraphData) => {
@@ -76,9 +76,18 @@ export default function App() {
         });
     }
 
-    poll();
-    const interval = setInterval(poll, 3000);
-    return () => clearInterval(interval);
+    fetchGraph();
+
+    // Real-time updates via SSE — server pushes on every new checkpoint
+    const es = new EventSource('/api/events');
+    es.addEventListener('checkpoint', () => fetchGraph());
+    es.onerror = () => {
+      // SSE dropped — fall back to polling until reconnected
+      const t = setTimeout(() => fetchGraph(), 3000);
+      return () => clearTimeout(t);
+    };
+
+    return () => es.close();
   }, []);
 
   const selected = useMemo<CheckpointData | null>(() => {
