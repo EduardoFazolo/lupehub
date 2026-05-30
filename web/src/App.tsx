@@ -54,18 +54,31 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch('/api/graph')
-      .then(r => { if (!r.ok) throw new Error(); return r.json(); })
-      .then((d: GraphData) => {
-        setData(d);
-        // Auto-select HEAD
-        const head = d.checkpoints.find(c => c.is_head);
-        if (head) setSelectedId(head.id);
-      })
-      .catch(() => {
-        setData(MOCK);
-        setSelectedId('cp-3');
-      });
+    let initial = true;
+
+    function poll() {
+      fetch('/api/graph')
+        .then(r => { if (!r.ok) throw new Error(); return r.json(); })
+        .then((d: GraphData) => {
+          setData(d);
+          if (initial) {
+            const head = d.checkpoints.find(c => c.is_head);
+            if (head) setSelectedId(head.id);
+            initial = false;
+          }
+        })
+        .catch(() => {
+          if (initial) {
+            setData(MOCK);
+            setSelectedId('cp-3');
+            initial = false;
+          }
+        });
+    }
+
+    poll();
+    const interval = setInterval(poll, 3000);
+    return () => clearInterval(interval);
   }, []);
 
   const selected = useMemo<CheckpointData | null>(() => {
